@@ -40,6 +40,16 @@ difference; **< 1 = the eye can't tell**). Verified against an independent `.cub
 
 ## Install (macOS, Apple Silicon)
 
+**One-click (recommended):** download **[`install.command`](install.command)**, then **double-click** it.
+It installs everything — prerequisites, the engine + AI, the panel, and the effect — and sets the
+engine to start automatically.
+
+> First time only: macOS may say *"unidentified developer."* If so, **right-click `install.command`
+> → Open → Open**. You'll be asked for your Mac password once (for Homebrew), and the AI download
+> takes a few minutes. When it finishes, **restart Premiere Pro**.
+
+**Manual (advanced):**
+
 ```bash
 git clone https://github.com/burskozbekov/colourMatik.git
 cd colourMatik
@@ -48,8 +58,8 @@ cd colourMatik
 ./install-effect.sh   # installs the native colourMatik effect
 ```
 
-Then **restart Premiere Pro**. Start the engine any time with `./colourmatik-app`
-(or run it as a login LaunchAgent so it's always ready).
+Then **restart Premiere Pro**. The engine runs automatically after install; start it manually any time
+with `./colourmatik-app`. To remove everything, double-click **`uninstall.command`**.
 
 ## Use it (2 clicks)
 

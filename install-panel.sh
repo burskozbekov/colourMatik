@@ -10,7 +10,12 @@ EXT="$HOME/Library/Application Support/Adobe/UXP/Plugins/External"
 DEST="$EXT/com.colourmatik.panel_1.0.0"
 REG="$HOME/Library/Application Support/Adobe/UXP/PluginsInfo/v1/premierepro.json"
 
-[ -f "$REG" ] || { echo "Premiere UXP registry not found — open Premiere once, then retry."; exit 1; }
+# Create the registry if Premiere hasn't run yet, so a fresh machine works too.
+if [ ! -f "$REG" ]; then
+    mkdir -p "$(dirname "$REG")"
+    echo '{"plugins":[]}' > "$REG"
+    echo "(created a new UXP registry — Premiere hadn't been opened yet)"
+fi
 
 cp "$REG" "$REG.colourmatik-backup"
 mkdir -p "$DEST"
