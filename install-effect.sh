@@ -19,9 +19,13 @@ if ! mkdir -p "$DESTDIR" 2>/dev/null || [ ! -w "$DESTDIR" ]; then
     $SUDO mkdir -p "$DESTDIR"
 fi
 $SUDO rm -rf "$DEST"
-$SUDO cp -R "$SRC" "$DEST"
-$SUDO codesign --force --sign - --timestamp=none "$DEST" >/dev/null 2>&1 || true
-$SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true   # let a downloaded build load
+$SUDO cp -R "$SRC" "$DEST"   # preserves the shipped signature (Developer ID + notarization)
+$SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+# Only adhoc-sign as a fallback if the copy has no valid signature at all (e.g. a
+# locally hand-built plugin). A shipped Developer-ID/notarized build is left untouched.
+if ! codesign --verify "$DEST" >/dev/null 2>&1; then
+    $SUDO codesign --force --sign - --timestamp=none "$DEST" >/dev/null 2>&1 || true
+fi
 
 echo "Installed → $DEST"
 echo "Restart Premiere Pro / After Effects, then find it under Video Effects ▸ colourMatik."

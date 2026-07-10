@@ -59,7 +59,10 @@ cd colourMatik
 ```
 
 Then **restart Premiere Pro**. The engine runs automatically after install; start it manually any time
-with `./colourmatik-app`. To remove everything, double-click **`uninstall.command`**.
+with `./colourmatik-app`.
+
+**Updating:** double-click **`update.command`** (in the installed `~/colourMatik` folder) — it pulls the
+latest and reinstalls. **Removing:** double-click **`uninstall.command`**.
 
 ## Use it (2 clicks)
 
