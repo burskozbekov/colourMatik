@@ -40,15 +40,15 @@ difference; **< 1 = the eye can't tell**). Verified against an independent `.cub
 
 ## Install (macOS, Apple Silicon)
 
-**One-click (recommended):** download **[`install.command`](install.command)**, then **double-click** it.
-It installs everything — prerequisites, the engine + AI, the panel, and the effect — and sets the
-engine to start automatically.
+**Easiest — notarized installer (no warnings):**
+1. Download **[colourMatik‑Installer.zip](https://github.com/burskozbekov/colourMatik/releases/latest)** from the latest release.
+2. Double‑click to unzip, then double‑click **colourMatik Installer**.
+3. Follow the prompts (Mac password once for Homebrew; the AI download takes a few minutes), then **restart Premiere Pro**.
 
-> First time only: macOS may say *"unidentified developer."* If so, **right-click `install.command`
-> → Open → Open**. You'll be asked for your Mac password once (for Homebrew), and the AI download
-> takes a few minutes. When it finishes, **restart Premiere Pro**.
+It's signed and **notarized by Apple**, so it opens with no "unidentified developer" warning. It sets up the
+engine + AI, the panel, and the effect, and keeps the engine running automatically.
 
-**Manual (advanced):**
+**Manual (from source):**
 
 ```bash
 git clone https://github.com/burskozbekov/colourMatik.git
