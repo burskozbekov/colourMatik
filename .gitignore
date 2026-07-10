@@ -24,3 +24,6 @@ slot_*.cube
 # Build artifacts (the SDK build tree; the shipped colourMatik.plugin is committed)
 build/
 *.o
+
+# Notarization build output
+dist/
