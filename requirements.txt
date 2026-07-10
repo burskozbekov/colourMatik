@@ -1,0 +1,13 @@
+# colourMatik — base engine (classical colour science). Python 3.11.
+# Local AI (Cinematic AI / CanonCGT + SegFormer) deps live in requirements-ai.txt.
+# One-shot setup for everything:  ./setup.sh
+numpy>=2,<3
+scipy>=1.11
+opencv-python-headless>=4.8
+colour-science>=0.4.4
+POT>=0.9
+pillow>=10
+imageio>=2.30
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9

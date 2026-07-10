@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# colourMatik CLI:  ./colourmatik-cli SOURCE REFERENCE -o out.cube
+#   SOURCE    = düzeltilecek klip (2. video)
+#   REFERENCE = renkleri örnek alınacak klip (1. video)
+set -e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
+exec "$DIR/.venv/bin/python" -m colourmatik.cli "$@"

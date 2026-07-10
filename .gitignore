@@ -1,0 +1,26 @@
+# Python venv + caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Vendored third-party model (CanonCGT) + its weights — fetched by ./setup.sh
+vendor/
+
+# Local tool config / editor
+.claude/
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Runtime outputs (LUT slots, generated cubes, previews)
+*.cube
+slot_*.cube
+.next_slot
+*.preview.png
+
+# Build artifacts (the SDK build tree; the shipped colourMatik.plugin is committed)
+build/
+*.o

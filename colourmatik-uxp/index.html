@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      margin: 0; padding: 14px 16px;
+      color: var(--uxp-host-text-color, #d4d4d4);
+      font-size: 12px; overflow-y: auto; height: 100vh; box-sizing: border-box;
+    }
+    .brand-header {
+      display: flex; align-items: center; gap: 9px;
+      margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #383838;
+    }
+    .brand-logo { width: 26px; height: 26px; flex: 0 0 auto; }
+    .brand-word {
+      font-size: 16px; font-weight: 700; letter-spacing: 0.2px;
+      color: var(--uxp-host-text-color, #eaeaea);
+    }
+    .brand-word .mk { color: #4ea1f7; }
+
+    .section { margin-bottom: 14px; }
+    .field-label {
+      display: block; margin: 0 0 6px; font-size: 10px; letter-spacing: 0.3px;
+      color: var(--uxp-host-text-color-secondary, #8f8f8f);
+    }
+
+    .slot { display: flex; align-items: center; gap: 8px; }
+    .slot-btn {
+      flex: 0 0 auto; height: 30px; padding: 0 12px; border-radius: 4px;
+      border: 1px solid #4a4a4a; background: rgba(0,0,0,0.22); color: inherit;
+      font-size: 11px; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center;
+    }
+    .slot-btn:hover { border-color: #1473e6; }
+    .slot-name {
+      flex: 1 1 auto; height: 30px; display: flex; align-items: center;
+      padding: 0 10px; border-radius: 4px; border: 1px solid #3d3d3d;
+      background: rgba(0,0,0,0.18); font-size: 11px;
+      color: var(--uxp-host-text-color-secondary, #8f8f8f);
+      overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    }
+    .slot-name.set { color: #33ab5f; }
+
+    .seg { display: flex; border: 1px solid #4a4a4a; border-radius: 4px; overflow: hidden; }
+    .seg-btn {
+      flex: 1; text-align: center; padding: 7px 0; font-size: 11px; font-weight: 600;
+      color: var(--uxp-host-text-color-secondary, #a0a0a0);
+      background: rgba(0,0,0,0.18); cursor: pointer;
+    }
+    .seg-btn.selected { background: #1473e6; color: #ffffff; }
+
+    .primary {
+      box-sizing: border-box; width: 100%; padding: 10px 0; border: 0; border-radius: 4px;
+      background: #1473e6; color: #ffffff; font-size: 12px; font-weight: 700;
+      letter-spacing: 0.3px; text-align: center; cursor: pointer;
+    }
+    .primary:disabled { opacity: 0.45; cursor: default; }
+
+    #intensity-section.hidden { display: none; }
+    .intensity-head {
+      display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;
+    }
+    .intensity-val { font-size: 12px; font-weight: 700; color: #4ea1f7; }
+    #intensity {
+      width: 100%; margin: 0; height: 18px; cursor: pointer;
+      accent-color: #1473e6;
+    }
+
+    #status {
+      margin-top: 14px; padding: 9px 11px; border-radius: 4px; border: 1px solid #3d3d3d;
+      background: rgba(0,0,0,0.18); line-height: 1.5; word-break: break-word;
+    }
+    #status .state { display: block; font-weight: 700; font-size: 10px; letter-spacing: 0.3px; margin-bottom: 2px; }
+    #status .msg { display: block; font-size: 11px; }
+    #status.idle .state { color: #8f8f8f; }
+    #status.busy .state { color: #4ea1f7; }
+    #status.done .state { color: #33ab5f; }
+    #status.error .state { color: #e34850; }
+
+    #preview { margin-top: 12px; }
+    #preview.hidden { display: none; }
+    #preview img { width: 100%; border-radius: 4px; border: 1px solid #3d3d3d; display: block; }
+
+    .footer {
+      margin-top: 16px; padding-top: 10px; border-top: 1px solid #383838;
+      text-align: center; font-size: 10px; color: var(--uxp-host-text-color-secondary, #7a7a7a);
+    }
+    .footer .brand { font-weight: 700; color: var(--uxp-host-text-color, #c8c8c8); }
+    .footer .dot { margin: 0 5px; color: #555555; }
+    .footer-meta { margin-top: 4px; }
+    #site-link, #update-link { color: #4ea1f7; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="brand-header">
+    <svg class="brand-logo" viewBox="0 0 24 24">
+      <rect x="2" y="4" width="6" height="16" rx="1.6" fill="#4ea1f7"></rect>
+      <rect x="9" y="4" width="6" height="16" rx="1.6" fill="#33ab5f"></rect>
+      <rect x="16" y="4" width="6" height="16" rx="1.6" fill="#e2a33e"></rect>
+    </svg>
+    <span class="brand-word">colour<span class="mk">Matik</span></span>
+  </div>
+
+  <div class="section">
+    <span class="field-label">REFERENCE — THE LOOK TO COPY</span>
+    <div class="slot">
+      <div class="slot-btn" id="refBtn">Use selected clip</div>
+      <div class="slot-name" id="refName">No clip selected</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <span class="field-label">TARGET — APPLY THE LOOK TO THIS</span>
+    <div class="slot">
+      <div class="slot-btn" id="srcBtn">Use selected clip</div>
+      <div class="slot-name" id="srcName">No clip selected</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <span class="field-label">SCENE</span>
+    <div class="seg">
+      <div class="seg-btn selected" id="mode-different">Different scene</div>
+      <div class="seg-btn" id="mode-same">Same scene</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <span class="field-label">MATCH TYPE</span>
+    <div class="seg">
+      <div class="seg-btn selected" id="look-exact">Accurate</div>
+      <div class="seg-btn" id="look-ai">Cinematic AI</div>
+    </div>
+  </div>
+
+  <button class="primary" id="run" disabled>MATCH &amp; APPLY</button>
+
+  <div id="intensity-section" class="section hidden" style="margin-top: 14px;">
+    <div class="intensity-head">
+      <span class="field-label" style="margin: 0;">INTENSITY</span>
+      <span class="intensity-val" id="intensity-val">100%</span>
+    </div>
+    <input type="range" id="intensity" min="0" max="200" value="130" />
+  </div>
+
+  <div id="status" class="idle">
+    <span class="state" id="status-state">IDLE</span>
+    <span class="msg" id="status-msg">Select a reference clip and a target clip, then Match &amp; Apply.</span>
+  </div>
+
+  <div id="preview" class="hidden"><img id="preview-img" src="" alt="before / after" /></div>
+
+  <div class="footer">
+    <span class="brand">colourMatik</span><span class="dot">&middot;</span>by Sevki Bugra Ozbek<span class="dot">&middot;</span><span id="site-link">catheadai.com</span>
+    <div class="footer-meta"><span id="version">v1.0.0</span><span class="dot">&middot;</span><span id="update-link">Check for updates</span></div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

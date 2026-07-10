@@ -1,0 +1,83 @@
+# colourMatik 🎨
+
+**Match the colours of one clip to another — accurately, and fully on your own machine.**
+
+colourMatik recolours a **target** clip so its look matches a **reference** clip, and applies the
+result as a real, named **`colourMatik`** effect inside Premiere Pro / After Effects — with a
+built-in **Intensity** slider. Nothing is uploaded; every frame stays on your computer.
+
+It does the job of aescripts' *AI Color Match*, with two things it doesn't have: **measurable
+colour accuracy** (ΔE00) and a choice between a precise **classical** match and a learned
+**cinematic AI** grade — the engine measures both and keeps whichever is best.
+
+> by **Sevki Bugra Ozbek** · [catheadai.com](https://catheadai.com)
+
+---
+
+## Two match types
+
+| Mode | What it does | Best for |
+|------|--------------|----------|
+| **Accurate** | Classical colour science (Monge–Kantorovich / IDT / smoothed 3D-LUT) plus a **SegFormer** scene model that matches region-to-region (sky↔sky, skin↔skin). Auto-selected by measured ΔE00. | Matching shots from the same shoot — highest measurable accuracy. |
+| **Cinematic AI** 🧠 | **CanonCGT** (CVPR 2026), a learned reference-grading model, running on your GPU (Apple Silicon / MPS). | A tasteful, photorealistic *look* transfer across very different scenes. |
+
+Both bake into a single flicker-free 3D LUT that the native effect applies, and both are driven by
+the same live Intensity slider (0–200 %).
+
+## How accurate?
+
+Measured by applying a known colour distortion and recovering it (ΔE00 = perceived colour
+difference; **< 1 = the eye can't tell**). Verified against an independent `.cube` reader.
+
+| Scenario | Before ΔE00 | After ΔE00 |
+|----------|-------------|------------|
+| Linear difference (white balance + primaries) | 4.73 | **0.03** |
+| Non-linear difference (tone curve + saturation) | 9.45 | **0.06** |
+| Different scene (distribution match) | 9.45 | **0.70** |
+| Real H.264 video (end-to-end) | 9.50 | **0.32** |
+
+---
+
+## Install (macOS, Apple Silicon)
+
+```bash
+git clone https://github.com/burskozbekov/colourMatik.git
+cd colourMatik
+./setup.sh            # venv + deps + local-AI model  (or: ./setup.sh --no-ai)
+./install-panel.sh    # installs the Premiere UXP panel
+./install-effect.sh   # installs the native colourMatik effect
+```
+
+Then **restart Premiere Pro**. Start the engine any time with `./colourmatik-app`
+(or run it as a login LaunchAgent so it's always ready).
+
+## Use it (2 clicks)
+
+1. Open **Window ▸ UXP Plugins ▸ colourMatik**.
+2. Select the **reference** clip → *Use selected clip*; select the **target** clip → *Use selected clip*.
+3. Pick **Accurate** or **Cinematic AI**, then **Match & Apply**. The `colourMatik` effect is added
+   automatically. Drag **Intensity** to taste (live).
+
+There's also a headless CLI: `./colourmatik-cli target.mp4 reference.mp4 -o match.cube`.
+
+---
+
+## How it works
+
+- **Engine** (`colourmatik/`) — a local FastAPI server that does the colour maths + AI and bakes a
+  33³/65³ `.cube` LUT. Runs on `http://127.0.0.1:8765`; the `.cube` also works in DaVinci Resolve / FCP.
+- **Panel** (`colourmatik-uxp/`) — the Premiere UXP panel; reads the selected clips, calls the
+  engine, and adds/configures the native effect.
+- **Native effect** (`colourmatik-fx/`) — a real After Effects–SDK effect that applies the LUT with a
+  built-in Intensity slider (C++ source + a pre-built Apple-Silicon build).
+
+Run the tests with `PYTHONPATH=. ./.venv/bin/python tests/run_tests.py`.
+
+## Credits & third-party
+
+- **CanonCGT** — *Reference-Based Color Grading via Canonical Pivot Representation*, CVPR 2026
+  ([repo](https://github.com/Jinwon-Ko/CanonCGT), Apache-2.0) — fetched by `setup.sh`.
+- **SegFormer** (NVIDIA, ADE20K) via 🤗 Transformers — scene segmentation.
+- Classical transport after Reinhard (2001) and Pitié & Kokaram (Monge–Kantorovich / IDT).
+
+Personal tool by **Sevki Bugra Ozbek** — [catheadai.com](https://catheadai.com).

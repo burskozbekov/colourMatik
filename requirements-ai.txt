@@ -1,0 +1,7 @@
+# colourMatik — optional LOCAL AI dependencies (Apple Silicon / MPS).
+# Enables "Cinematic AI" (CanonCGT) + the SegFormer scene-aware Accurate mode.
+# The engine runs fine without these (classical methods); install for the AI modes.
+torch>=2.2
+torchvision>=0.17
+transformers>=4.40
+gdown>=5.1
