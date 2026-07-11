@@ -15,6 +15,23 @@
 #include <math.h>
 #include <stdarg.h>
 
+// Premiere renders on several threads at once; LUT loads into the shared
+// sequence data must be serialized, and 'loaded' must publish with a barrier.
+#ifdef AE_OS_WIN
+static volatile LONG cm_lock_v = 0;
+static void cm_lock(void)   { while (InterlockedCompareExchange(&cm_lock_v, 1, 0)) Sleep(0); }
+static void cm_unlock(void) { InterlockedExchange(&cm_lock_v, 0); }
+#define CM_STORE_RELEASE(p, v) InterlockedExchange((volatile LONG *)(p), (LONG)(v))
+#define CM_LOAD_ACQUIRE(p)     InterlockedCompareExchange((volatile LONG *)(p), 0, 0)
+#else
+#include <os/lock.h>
+static os_unfair_lock cm_lock_v = OS_UNFAIR_LOCK_INIT;
+static void cm_lock(void)   { os_unfair_lock_lock(&cm_lock_v); }
+static void cm_unlock(void) { os_unfair_lock_unlock(&cm_lock_v); }
+#define CM_STORE_RELEASE(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#define CM_LOAD_ACQUIRE(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#endif
+
 // ------------------------------------------------------------ LUT helpers
 static void cm_lut_path(A_long slot, char *out, size_t n) {
 #ifdef AE_OS_WIN
@@ -60,7 +77,9 @@ static int cm_load_lut(A_long slot, ColourMatikSeq *seq) {
 static inline float cm_clampf(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
 // Trilinear sample of an S^3 LUT at (r,g,b) in [0,1]. idx = r + g*S + b*S*S.
+// S must be >= 2 (callers only sample a fully published LUT, but keep the guard).
 static void cm_sample(const float *lut, int S, float r, float g, float b, float out[3]) {
+	if (S < 2) { out[0] = r; out[1] = g; out[2] = b; return; }
 	float cr = cm_clampf(r) * (S - 1), cg = cm_clampf(g) * (S - 1), cb = cm_clampf(b) * (S - 1);
 	int r0 = (int)cr, g0 = (int)cg, b0 = (int)cb;
 	if (r0 > S - 2) r0 = S - 2; if (r0 < 0) r0 = 0;
@@ -80,14 +99,24 @@ static void cm_sample(const float *lut, int S, float r, float g, float b, float 
 
 typedef struct { ColourMatikSeq *seq; float t; } CM_Info;
 
-// Diagnostic trace (first calls + anomalies) -> /tmp/colourmatik_fx.log.
-// Premiere reports "a low-level exception occurred" without saying where; this
-// pinpoints the exact render call if it ever happens again. Cheap + capped.
+// Diagnostic trace -> /tmp/colourmatik_fx.log (or %TEMP% on Windows), capped.
+// DORMANT unless the COLOURMATIK_TRACE env var is set, so shipping builds are
+// silent but field-debuggable. Premiere's "a low-level exception occurred"
+// doesn't say where; this pinpoints the exact render call when enabled.
 static void cm_trace(const char *fmtstr, ...) {
+	static int enabled = -1;
+	if (enabled == -1) enabled = getenv("COLOURMATIK_TRACE") ? 1 : 0;
+	if (!enabled) return;
 	static int n = 0;
-	if (n > 200) return;
+	if (n > 400) return;
 	n++;
+#ifdef AE_OS_WIN
+	const char *tmp = getenv("TEMP"); if (!tmp) tmp = ".";
+	char lp[1024]; snprintf(lp, sizeof(lp), "%s\\colourmatik_fx.log", tmp);
+	FILE *lf = fopen(lp, "a");
+#else
 	FILE *lf = fopen("/tmp/colourmatik_fx.log", "a");
+#endif
 	if (!lf) return;
 	va_list ap;
 	va_start(ap, fmtstr);
@@ -113,12 +142,24 @@ static PF_Err cm_pixel(void *refcon, A_long x, A_long y, PF_Pixel *inP, PF_Pixel
 
 // ------------------------------------------------------------ Premiere BGRA paths
 // Row loops over the effect worlds; memory order is B,G,R,A per pixel.
-static void cm_render_bgra_32f(PF_EffectWorld *src, PF_EffectWorld *dst,
-                               A_long width, A_long height, CM_Info *info) {
+// IMPORTANT: honour the host's abort callback every few rows. Premiere cancels
+// superseded renders (project open, scrubbing, apply-time thumbnails); a plugin
+// that never checks gets hard-cancelled — which surfaces in the Events panel as
+// "a low-level exception occurred". Checking lets us exit cleanly instead.
+#define CM_ABORT_EVERY 16
+static int cm_aborted(PF_InData *in_data, A_long y) {
+	if ((y & (CM_ABORT_EVERY - 1)) != 0) return 0;
+	if (!in_data || !in_data->inter.abort) return 0;
+	return (*in_data->inter.abort)(in_data->effect_ref) != PF_Err_NONE;
+}
+
+static PF_Err cm_render_bgra_32f(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
+                                 A_long width, A_long height, CM_Info *info) {
 	const float *lut = info->seq->lut;
 	const int S = (int)info->seq->size;
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
+		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
 		const float *ip = (const float *)((const char *)src->data + (size_t)y * src->rowbytes);
 		float *op = (float *)((char *)dst->data + (size_t)y * dst->rowbytes);
 		for (A_long x = 0; x < width; x++) {
@@ -134,14 +175,16 @@ static void cm_render_bgra_32f(PF_EffectWorld *src, PF_EffectWorld *dst,
 			ip += 4; op += 4;
 		}
 	}
+	return PF_Err_NONE;
 }
 
-static void cm_render_bgra_8u(PF_EffectWorld *src, PF_EffectWorld *dst,
-                              A_long width, A_long height, CM_Info *info) {
+static PF_Err cm_render_bgra_8u(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
+                                A_long width, A_long height, CM_Info *info) {
 	const float *lut = info->seq->lut;
 	const int S = (int)info->seq->size;
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
+		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
 		const unsigned char *ip = (const unsigned char *)src->data + (size_t)y * src->rowbytes;
 		unsigned char *op = (unsigned char *)dst->data + (size_t)y * dst->rowbytes;
 		for (A_long x = 0; x < width; x++) {
@@ -155,15 +198,18 @@ static void cm_render_bgra_8u(PF_EffectWorld *src, PF_EffectWorld *dst,
 			ip += 4; op += 4;
 		}
 	}
+	return PF_Err_NONE;
 }
 
-static void cm_copy_rows(PF_EffectWorld *src, PF_EffectWorld *dst,
-                         A_long width, A_long height, size_t bpp) {
+static PF_Err cm_copy_rows(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
+                           A_long width, A_long height, size_t bpp) {
 	size_t nbytes = (size_t)width * bpp;
 	for (A_long y = 0; y < height; y++) {
+		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
 		memcpy((char *)dst->data + (size_t)y * dst->rowbytes,
 		       (const char *)src->data + (size_t)y * src->rowbytes, nbytes);
 	}
+	return PF_Err_NONE;
 }
 
 // ------------------------------------------------------------ AE entry points
@@ -241,11 +287,21 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	ColourMatikSeq *seq = NULL;
 	if (seqH && *(void **)seqH) {
 		seq = *(ColourMatikSeq **)seqH;
-		if (seq->slot != slot || !seq->loaded) {
-			seq->loaded = cm_load_lut(slot, seq);
-			seq->slot = slot;
+		// Premiere renders concurrently: serialize the (slow, 65^3) LUT load and
+		// publish 'loaded' with release/acquire so no thread ever samples a
+		// half-written LUT (that was the garbage-frame + exception storm).
+		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->slot != slot) {
+			cm_lock();
+			if (seq->slot != slot || !seq->loaded) {
+				CM_STORE_RELEASE(&seq->loaded, 0);
+				seq->slot = slot;
+				int ok = cm_load_lut(slot, seq);   // fills lut[] and seq->size
+				CM_STORE_RELEASE(&seq->loaded, ok ? 1 : 0);
+			}
+			cm_unlock();
 		}
-		if (!seq->loaded || intensity == 0.f) identity = 1;
+		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->size < 2 || intensity == 0.f)
+			identity = 1;
 	} else {
 		identity = 1;
 	}
@@ -257,19 +313,34 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 		SPBasicSuite *bs = in_data->pica_basicP;
 		PF_PixelFormatSuite1 *pfs = NULL;
 		PrPixelFormat fmt = PrPixelFormat_BGRA_4444_8u;
+		int fmt_ok = 0;
 		if (bs->AcquireSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1,
 		                     (const void **)&pfs) == kSPNoError && pfs) {
-			(*pfs->GetPixelFormat)(output, &fmt);
+			fmt_ok = ((*pfs->GetPixelFormat)(output, &fmt) == PF_Err_NONE);
 			bs->ReleaseSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1);
+		}
+		// On transient apply-time renders GetPixelFormat can fail or return
+		// garbage. We only ever declared the two BGRA formats, so infer from the
+		// row stride — the one reliable signal (|rowbytes|/width: 4 -> 8u, 16 -> 32f).
+		if (!fmt_ok || (fmt != PrPixelFormat_BGRA_4444_32f &&
+		                fmt != PrPixelFormat_BGRA_4444_8u)) {
+			A_long rb = output->rowbytes < 0 ? -output->rowbytes : output->rowbytes;
+			A_long px = (output->width > 0) ? rb / output->width : 4;
+			fmt = (px >= 16) ? PrPixelFormat_BGRA_4444_32f : PrPixelFormat_BGRA_4444_8u;
+			cm_trace("  (fmt query unreliable -> inferred %s from stride %ld/px)",
+			         px >= 16 ? "32f" : "8u", (long)px);
 		}
 		size_t bpp = (fmt == PrPixelFormat_BGRA_4444_32f) ? 16 : 4;
 		A_long w = MIN(inputW->width, output->width);
 		A_long h = MIN(inputW->height, output->height);
 		// Never trust dims past what the rowbytes can actually hold, and never
-		// touch a world without pixels — early apply-time renders can hand us
-		// half-initialised worlds (the "low-level exception" class of bugs).
-		if (inputW->rowbytes > 0)  w = MIN(w, (A_long)(inputW->rowbytes / (A_long)bpp));
-		if (output->rowbytes > 0)  w = MIN(w, (A_long)(output->rowbytes / (A_long)bpp));
+		// touch a world without pixels (half-initialised apply-time worlds).
+		{
+			A_long irb = inputW->rowbytes < 0 ? -inputW->rowbytes : inputW->rowbytes;
+			A_long orb = output->rowbytes < 0 ? -output->rowbytes : output->rowbytes;
+			if (irb > 0) w = MIN(w, (A_long)(irb / (A_long)bpp));
+			if (orb > 0) w = MIN(w, (A_long)(orb / (A_long)bpp));
+		}
 		cm_trace("render fmt=%d in=%ldx%ld rb=%ld %p out=%ldx%ld rb=%ld %p slot=%ld loaded=%ld t=%.2f",
 		         (int)fmt, (long)inputW->width, (long)inputW->height, (long)inputW->rowbytes,
 		         inputW->data, (long)output->width, (long)output->height, (long)output->rowbytes,
@@ -278,18 +349,19 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 			cm_trace("  -> skipped (empty/null world)");
 			return PF_Err_NONE;
 		}
+		PF_Err perr;
 		if (fmt == PrPixelFormat_BGRA_4444_32f) {
-			if (identity) cm_copy_rows(inputW, output, w, h, 16);
-			else          cm_render_bgra_32f(inputW, output, w, h, &info);
-			return PF_Err_NONE;
+			perr = identity ? cm_copy_rows(in_data, inputW, output, w, h, 16)
+			                : cm_render_bgra_32f(in_data, inputW, output, w, h, &info);
+		} else {
+			perr = identity ? cm_copy_rows(in_data, inputW, output, w, h, 4)
+			                : cm_render_bgra_8u(in_data, inputW, output, w, h, &info);
 		}
-		if (fmt == PrPixelFormat_BGRA_4444_8u) {
-			if (identity) cm_copy_rows(inputW, output, w, h, 4);
-			else          cm_render_bgra_8u(inputW, output, w, h, &info);
-			return PF_Err_NONE;
-		}
-		cm_trace("  -> unexpected fmt, falling back to ARGB path");
-		// Unexpected format: fall through to the generic 8-bit ARGB path below.
+		cm_trace(perr == PF_Err_NONE ? "  -> done" : "  -> aborted (host superseded)");
+		// Premiere logs ANY non-zero return from a Pr-format render as "a low-level
+		// exception". A host-superseded render isn't an error — we already stopped
+		// early to save CPU; just report success. The discarded frame is moot.
+		return PF_Err_NONE;   // NEVER hand a Premiere world to the AE PF_ITERATE path
 	}
 
 	// ---------------- After Effects (and fallback): 8-bit ARGB --------------
