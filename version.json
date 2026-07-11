@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
-  "url": "https://catheadai.com/colourmatik/",
-  "notes": "colourMatik — Accurate (classical + SegFormer) and Cinematic AI (CanonCGT) match modes."
+  "version": "1.1.0",
+  "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
+  "notes": "colourMatik 1.1 — timeline-segment sampling, 7-frame pooling, residual fine-tune pass, 32-bit float + 65-cube effect, Windows support."
 }
