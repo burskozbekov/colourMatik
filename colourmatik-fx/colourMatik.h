@@ -13,6 +13,10 @@
 #ifndef COLOURMATIK_H
 #define COLOURMATIK_H
 
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS 1   // getenv/fopen/sscanf are fine here; sample builds with /WX
+#endif
+
 #include "AEConfig.h"
 
 #ifdef AE_OS_WIN
