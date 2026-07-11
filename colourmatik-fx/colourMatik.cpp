@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stddef.h>   // ptrdiff_t (signed row-stride arithmetic)
 
 // Premiere renders on several threads at once. We publish 'loaded' with a
 // release/acquire barrier so a reader never samples a half-written LUT — but we
@@ -101,20 +102,23 @@ typedef struct { ColourMatikSeq *seq; float t; } CM_Info;
 // DORMANT unless the COLOURMATIK_TRACE env var is set, so shipping builds are
 // silent but field-debuggable. Premiere's "a low-level exception occurred"
 // doesn't say where; this pinpoints the exact render call when enabled.
+#ifdef AE_OS_WIN
+#define CM_TRACE_MARK "C:\\colourmatik_trace_on"
+#define CM_TRACE_LOG  "C:\\colourmatik_fx.log"
+#else
+#define CM_TRACE_MARK "/tmp/colourmatik_trace_on"
+#define CM_TRACE_LOG  "/tmp/colourmatik_fx.log"
+#endif
 static void cm_trace(const char *fmtstr, ...) {
+	// Gated on a MARKER FILE (not an env var — Premiere's render context doesn't
+	// inherit launchctl env). Absent on users' machines, so shipping is silent.
 	static int enabled = -1;
-	if (enabled == -1) enabled = getenv("COLOURMATIK_TRACE") ? 1 : 0;
+	if (enabled == -1) { FILE *m = fopen(CM_TRACE_MARK, "r"); enabled = m ? 1 : 0; if (m) fclose(m); }
 	if (!enabled) return;
 	static int n = 0;
 	if (n > 400) return;
 	n++;
-#ifdef AE_OS_WIN
-	const char *tmp = getenv("TEMP"); if (!tmp) tmp = ".";
-	char lp[1024]; snprintf(lp, sizeof(lp), "%s\\colourmatik_fx.log", tmp);
-	FILE *lf = fopen(lp, "a");
-#else
-	FILE *lf = fopen("/tmp/colourmatik_fx.log", "a");
-#endif
+	FILE *lf = fopen(CM_TRACE_LOG, "a");
 	if (!lf) return;
 	va_list ap;
 	va_start(ap, fmtstr);
@@ -146,10 +150,20 @@ static PF_Err cm_pixel(void *refcon, A_long x, A_long y, PF_Pixel *inP, PF_Pixel
 // "a low-level exception occurred". Checking lets us exit cleanly instead.
 #define CM_ABORT_EVERY 16
 static int cm_aborted(PF_InData *in_data, A_long y) {
-	if ((y & (CM_ABORT_EVERY - 1)) != 0) return 0;
-	if (!in_data || !in_data->inter.abort) return 0;
-	return (*in_data->inter.abort)(in_data->effect_ref) != PF_Err_NONE;
+	// DISABLED under Premiere: calling in_data->inter.abort in a Premiere software
+	// render faults (Premiere doesn't populate the AE interaction callbacks the
+	// same way). Premiere cancels superseded renders itself, so we don't need it.
+	(void)in_data; (void)y;
+	return 0;
 }
+
+// Row base pointer. rowbytes is SIGNED and often NEGATIVE in Premiere (bottom-up
+// frames, esp. thumbnails / load-time renders): data points at the first output
+// row and the stride walks BACKWARD through memory. The multiply MUST stay in
+// signed 64-bit — casting a negative stride through size_t makes a huge positive
+// offset and walks off the buffer (SIGSEGV that Premiere logs as a "low-level
+// exception"). ptrdiff_t keeps it signed and 64-bit on both macOS and Win64.
+#define CM_ROW(base, y, rb) ((char *)(base) + (ptrdiff_t)(y) * (ptrdiff_t)(rb))
 
 static PF_Err cm_render_bgra_32f(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
                                  A_long width, A_long height, CM_Info *info) {
@@ -158,8 +172,8 @@ static PF_Err cm_render_bgra_32f(PF_InData *in_data, PF_EffectWorld *src, PF_Eff
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
 		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
-		const float *ip = (const float *)((const char *)src->data + (size_t)y * src->rowbytes);
-		float *op = (float *)((char *)dst->data + (size_t)y * dst->rowbytes);
+		const float *ip = (const float *)CM_ROW(src->data, y, src->rowbytes);
+		float *op = (float *)CM_ROW(dst->data, y, dst->rowbytes);
 		for (A_long x = 0; x < width; x++) {
 			float b = ip[0], g = ip[1], r = ip[2], a = ip[3];
 			float rc = cm_clampf(r), gc = cm_clampf(g), bc = cm_clampf(b);
@@ -183,8 +197,8 @@ static PF_Err cm_render_bgra_8u(PF_InData *in_data, PF_EffectWorld *src, PF_Effe
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
 		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
-		const unsigned char *ip = (const unsigned char *)src->data + (size_t)y * src->rowbytes;
-		unsigned char *op = (unsigned char *)dst->data + (size_t)y * dst->rowbytes;
+		const unsigned char *ip = (const unsigned char *)CM_ROW(src->data, y, src->rowbytes);
+		unsigned char *op = (unsigned char *)CM_ROW(dst->data, y, dst->rowbytes);
 		for (A_long x = 0; x < width; x++) {
 			float b = ip[0] / 255.f, g = ip[1] / 255.f, r = ip[2] / 255.f;
 			float o[3];
@@ -204,8 +218,8 @@ static PF_Err cm_copy_rows(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWor
 	size_t nbytes = (size_t)width * bpp;
 	for (A_long y = 0; y < height; y++) {
 		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
-		memcpy((char *)dst->data + (size_t)y * dst->rowbytes,
-		       (const char *)src->data + (size_t)y * src->rowbytes, nbytes);
+		memcpy(CM_ROW(dst->data, y, dst->rowbytes),
+		       CM_ROW(src->data, y, src->rowbytes), nbytes);
 	}
 	return PF_Err_NONE;
 }
@@ -258,17 +272,31 @@ static PF_Err SequenceSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDe
 	seq->slot = -1;
 	seq->loaded = 0;
 	seq->size = 0;
+	// The big LUT lives here, off the flattened struct. Allocated once, single-
+	// threaded, so renders never race an allocation. NULL on failure -> identity.
+	seq->lut = (float *)malloc(sizeof(float) * (size_t)CM_LUT_N3MAX * 3);
 	return PF_Err_NONE;
 }
 
 static PF_Err SequenceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
-	if (in_data->sequence_data) { PF_DISPOSE_HANDLE(in_data->sequence_data); out_data->sequence_data = NULL; }
+	if (in_data->sequence_data) {
+		ColourMatikSeq *seq = *(ColourMatikSeq **)in_data->sequence_data;
+		if (seq && seq->lut) { free(seq->lut); seq->lut = NULL; }
+		PF_DISPOSE_HANDLE(in_data->sequence_data);
+		out_data->sequence_data = NULL;
+	}
 	return PF_Err_NONE;
 }
 
 static PF_Err SequenceResetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
-	if (!in_data->sequence_data) return SequenceSetup(in_data, out_data, params, output);
-	return PF_Err_NONE;
+	// ALWAYS start fresh. A restored (flattened) struct has a garbage 'lut'
+	// pointer and possibly a stale size from another build; dereferencing or
+	// reusing it is the load-time crash. Discard it and allocate a correct,
+	// freshly-sized struct + LUT. We lose nothing: the slot comes from a param
+	// and the LUT reloads from its .cube file on the next render.
+	if (in_data->sequence_data) PF_DISPOSE_HANDLE(in_data->sequence_data);
+	out_data->sequence_data = NULL;
+	return SequenceSetup(in_data, out_data, params, output);
 }
 
 static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
@@ -283,37 +311,44 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	PF_Handle seqH = in_data->sequence_data ? in_data->sequence_data
 	                                        : out_data->sequence_data;
 	ColourMatikSeq *seq = NULL;
-	if (seqH && *(void **)seqH) {
-		seq = *(ColourMatikSeq **)seqH;
-		// Lock-free load (see note above). On a slot change, drop 'loaded' first so
-		// readers fall back to identity instead of sampling a slot mid-swap; then
-		// (re)load. Concurrent loaders write identical bytes for the same slot.
+	if (seqH && *(void **)seqH && (seq = *(ColourMatikSeq **)seqH) != NULL && seq->lut) {
+		// seq->lut is a real buffer allocated THIS session (SequenceSetup/Resetup).
+		// Lock-free load: on a slot change, drop 'loaded' first so readers fall
+		// back to identity instead of sampling a slot mid-swap; then (re)load.
+		// Concurrent loaders write identical bytes for the same slot.
 		if (seq->slot != slot) {
 			CM_STORE_RELEASE(&seq->loaded, 0);
 			seq->slot = slot;
 		}
 		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0) {
-			int ok = cm_load_lut(slot, seq);       // fills lut[] and seq->size
+			int ok = cm_load_lut(slot, seq);       // fills seq->lut and seq->size
 			CM_STORE_RELEASE(&seq->loaded, ok ? 1 : 0);
 		}
 		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->size < 2 || intensity == 0.f)
 			identity = 1;
 	} else {
-		identity = 1;
+		identity = 1;   // no sequence data / no LUT buffer -> passthrough
 	}
 
 	CM_Info info; info.seq = seq; info.t = intensity;
 
 	// ---------------- Premiere Pro: BGRA float / 8-bit paths ----------------
-	if (in_data->appl_id == kAppID_Premiere && in_data->pica_basicP) {
-		SPBasicSuite *bs = in_data->pica_basicP;
-		PF_PixelFormatSuite1 *pfs = NULL;
+	// Gate on appl_id ALONE. During load-time / thumbnail renders pica_basicP can
+	// be NULL; if we fell through to the AE PF_ITERATE/PF_COPY path on a Premiere
+	// world we'd fault (that's the load-time "low-level exception"). A Premiere
+	// render is ALWAYS handled here — the pixel format is inferred from the row
+	// stride when the suite is unavailable.
+	if (in_data->appl_id == kAppID_Premiere) {
 		PrPixelFormat fmt = PrPixelFormat_BGRA_4444_8u;
 		int fmt_ok = 0;
-		if (bs->AcquireSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1,
-		                     (const void **)&pfs) == kSPNoError && pfs) {
-			fmt_ok = ((*pfs->GetPixelFormat)(output, &fmt) == PF_Err_NONE);
-			bs->ReleaseSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1);
+		if (in_data->pica_basicP) {
+			SPBasicSuite *bs = in_data->pica_basicP;
+			PF_PixelFormatSuite1 *pfs = NULL;
+			if (bs->AcquireSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1,
+			                     (const void **)&pfs) == kSPNoError && pfs) {
+				fmt_ok = ((*pfs->GetPixelFormat)(output, &fmt) == PF_Err_NONE);
+				bs->ReleaseSuite(kPFPixelFormatSuite, kPFPixelFormatSuiteVersion1);
+			}
 		}
 		// On transient apply-time renders GetPixelFormat can fail or return
 		// garbage. We only ever declared the two BGRA formats, so infer from the
@@ -361,6 +396,20 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	}
 
 	// ---------------- After Effects (and fallback): 8-bit ARGB --------------
+	// Only take the AE path for a genuine host: appl_id must be a printable 4-char
+	// code ('FXTC' for After Effects, etc.). Premiere sometimes issues anomalous
+	// render calls with an uninitialised in_data (garbage appl_id / pica pointer);
+	// running PF_ITERATE/PF_COPY on those faults. For anything that isn't a real
+	// host, do nothing and report success — the frame is transient.
+	{
+		unsigned a = (unsigned)in_data->appl_id;
+		int printable = 1;
+		for (int k = 0; k < 4; k++) { unsigned c = (a >> (k * 8)) & 0xFF; if (c < 0x20 || c > 0x7E) printable = 0; }
+		if (!printable) {
+			cm_trace("anomalous in_data (appl=0x%x) -> no-op", a);
+			return PF_Err_NONE;
+		}
+	}
 	if (identity) {
 		return PF_COPY(inputW, output, NULL, NULL);
 	}
