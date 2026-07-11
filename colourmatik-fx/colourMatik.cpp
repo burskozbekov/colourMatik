@@ -15,19 +15,17 @@
 #include <math.h>
 #include <stdarg.h>
 
-// Premiere renders on several threads at once; LUT loads into the shared
-// sequence data must be serialized, and 'loaded' must publish with a barrier.
+// Premiere renders on several threads at once. We publish 'loaded' with a
+// release/acquire barrier so a reader never samples a half-written LUT — but we
+// deliberately DO NOT hold a mutex across the load. Premiere cancels superseded
+// render threads mid-flight; a thread killed while holding a lock left the lock
+// owned-by-a-dead-thread, which os_unfair_lock turns into a whole-process abort
+// (that was the crash). Lock-free load can't do that: concurrent loaders of the
+// same slot write identical bytes, and readers are gated on the release store.
 #ifdef AE_OS_WIN
-static volatile LONG cm_lock_v = 0;
-static void cm_lock(void)   { while (InterlockedCompareExchange(&cm_lock_v, 1, 0)) Sleep(0); }
-static void cm_unlock(void) { InterlockedExchange(&cm_lock_v, 0); }
 #define CM_STORE_RELEASE(p, v) InterlockedExchange((volatile LONG *)(p), (LONG)(v))
 #define CM_LOAD_ACQUIRE(p)     InterlockedCompareExchange((volatile LONG *)(p), 0, 0)
 #else
-#include <os/lock.h>
-static os_unfair_lock cm_lock_v = OS_UNFAIR_LOCK_INIT;
-static void cm_lock(void)   { os_unfair_lock_lock(&cm_lock_v); }
-static void cm_unlock(void) { os_unfair_lock_unlock(&cm_lock_v); }
 #define CM_STORE_RELEASE(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
 #define CM_LOAD_ACQUIRE(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)
 #endif
@@ -287,18 +285,16 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	ColourMatikSeq *seq = NULL;
 	if (seqH && *(void **)seqH) {
 		seq = *(ColourMatikSeq **)seqH;
-		// Premiere renders concurrently: serialize the (slow, 65^3) LUT load and
-		// publish 'loaded' with release/acquire so no thread ever samples a
-		// half-written LUT (that was the garbage-frame + exception storm).
-		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->slot != slot) {
-			cm_lock();
-			if (seq->slot != slot || !seq->loaded) {
-				CM_STORE_RELEASE(&seq->loaded, 0);
-				seq->slot = slot;
-				int ok = cm_load_lut(slot, seq);   // fills lut[] and seq->size
-				CM_STORE_RELEASE(&seq->loaded, ok ? 1 : 0);
-			}
-			cm_unlock();
+		// Lock-free load (see note above). On a slot change, drop 'loaded' first so
+		// readers fall back to identity instead of sampling a slot mid-swap; then
+		// (re)load. Concurrent loaders write identical bytes for the same slot.
+		if (seq->slot != slot) {
+			CM_STORE_RELEASE(&seq->loaded, 0);
+			seq->slot = slot;
+		}
+		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0) {
+			int ok = cm_load_lut(slot, seq);       // fills lut[] and seq->size
+			CM_STORE_RELEASE(&seq->loaded, ok ? 1 : 0);
 		}
 		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->size < 2 || intensity == 0.f)
 			identity = 1;
