@@ -37,6 +37,17 @@ WORK = Path(tempfile.gettempdir()) / "colourmatik_web"
 WORK.mkdir(exist_ok=True)
 _RESULTS: dict[str, Path] = {}
 _JOBS: dict[str, dict] = {}  # rid -> {lut, tf, src1, ref1, corresponded} for live re-baking
+
+# Live progress for the panel's loading bar. Keyed by a client-supplied job_id;
+# the panel polls GET /progress/{job_id} while /match_paths is still running.
+_PROGRESS: dict[str, dict] = {}
+
+
+def _set_progress(job_id, pct, msg):
+    if job_id:
+        _PROGRESS[job_id] = {"pct": max(0.0, min(1.0, float(pct))), "msg": msg}
+        while len(_PROGRESS) > 64:                 # bounded; old jobs fall off
+            _PROGRESS.pop(next(iter(_PROGRESS)), None)
 _LOCK = threading.Lock()     # serialize LUT-folder writes (avoid concurrent-write races)
 _MAX_CACHE = 32              # cap the in-memory caches — each job holds a LUT + frames (~MBs)
 
@@ -151,29 +162,46 @@ def index() -> str:
 
 def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
              job: Path, title: str, look: str = "exact",
-             src_range: tuple | None = None, ref_range: tuple | None = None) -> dict:
+             src_range: tuple | None = None, ref_range: tuple | None = None,
+             job_id: str | None = None) -> dict:
     corresponded = (mode == "same")
     # Frame pooling (stacked frames) helps the classical distribution methods, but the
     # learned look-transfer (CanonCGT) analyses ONE coherent image — give it a single frame.
     f = 1 if look == "ai_grade" else frames
     si, so = src_range or (None, None)
     ri, ro = ref_range or (None, None)
-    src = cmio.load_any(src_path, frames=f, start=si, end=so)
-    ref = cmio.load_any(ref_path, frames=f, start=ri, end=ro)
-    res = match(src, ref, corresponded=corresponded, tf=tf, look=look)
 
+    _set_progress(job_id, 0.04, "Reading the clips")
+    # Load both clips concurrently — each is an independent ffmpeg decode, so
+    # running them in parallel roughly halves the frame-extraction wait.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fs = ex.submit(cmio.load_any, src_path, frames=f, start=si, end=so)
+        fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro)
+        src, ref = fs.result(), fr.result()
+
+    _set_progress(job_id, 0.16, "Analysing colour")
+    # match() spans 16%..82% of the bar; forward its internal milestones.
+    res = match(src, ref, corresponded=corresponded, tf=tf, look=look,
+                progress=lambda p, m: _set_progress(job_id, 0.16 + p * 0.66, m))
+
+    _set_progress(job_id, 0.84, "Baking the LUT")
     cube = job / "colourMatik.cube"
     write_cube(cube, res.lut, title=title)
     _install_lut(res.lut, tf)  # expose in Premiere LUT dropdowns (visible after next launch)
 
-    src1 = cmio.load_any(src_path, frames=1, start=si, end=so)
-    ref1 = cmio.load_any(ref_path, frames=1, start=ri, end=ro)
+    # Preview uses ONE frame — reuse the first frame already decoded above (each
+    # pooled clip is n frames stacked vertically) instead of decoding again.
+    src1 = src[: src.shape[0] // f] if f > 1 else src
+    ref1 = ref[: ref.shape[0] // f] if f > 1 else ref
+    _set_progress(job_id, 0.92, "Rendering the preview")
     matched1 = apply_lut(src1, res.lut)
     preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
 
     rid = uuid.uuid4().hex
     _remember(rid, cube, {"lut": res.lut, "tf": tf, "src1": src1, "ref1": ref1,
                           "corresponded": corresponded})
+    _set_progress(job_id, 1.0, "Done")
     return {
         "ok": True,
         "rid": rid,
@@ -222,6 +250,7 @@ class PathReq(BaseModel):
     source_out: float | None = None
     reference_in: float | None = None
     reference_out: float | None = None
+    job_id: str | None = None   # client tag so the panel can poll GET /progress/{job_id}
 
 
 @app.post("/match_paths")
@@ -238,10 +267,19 @@ def match_paths(req: PathReq):
         return JSONResponse(_process(src, ref, req.mode, req.tf, req.frames, job,
                                      f"colourMatik {src.stem}", look=req.look,
                                      src_range=(req.source_in, req.source_out),
-                                     ref_range=(req.reference_in, req.reference_out)))
+                                     ref_range=(req.reference_in, req.reference_out),
+                                     job_id=req.job_id))
     except Exception as e:
         traceback.print_exc()
+        if req.job_id:
+            _set_progress(req.job_id, 1.0, "error")
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
+@app.get("/progress/{job_id}")
+def get_progress(job_id: str):
+    """Live progress for the panel's loading bar (0..1 + a short stage message)."""
+    return JSONResponse(_PROGRESS.get(job_id, {"pct": 0.0, "msg": "Starting"}))
 
 
 class BakeReq(BaseModel):

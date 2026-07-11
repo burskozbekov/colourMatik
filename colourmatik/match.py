@@ -37,7 +37,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
           lattice_L: int = 25, sample: int = 300_000, seed: int = 0,
           skin_protect: bool = True, skin_weight: float = 8.0,
           neural: bool = True, look: str = "exact",
-          refine: bool = True) -> MatchResult:
+          refine: bool = True, progress=None) -> MatchResult:
     """Match `src_enc` (video 2) to `tgt_enc` (video 1). Returns winning LUT + report.
 
     Every candidate is turned into its actual `size^3` LUT, that LUT is applied to
@@ -47,6 +47,12 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     skin_protect weights skin pixels up during fitting (eyes are most critical of
     skin), so the match protects skin tones even at a small cost elsewhere.
     """
+    # Optional progress reporter: progress(fraction 0..1, human message). No-op if None.
+    def _p(frac, msg):
+        if progress:
+            try: progress(float(frac), msg)
+            except Exception: pass
+
     # Sanitize inputs: display-referred [0,1], no NaN/Inf (e.g. a 32-bit float TIFF
     # can carry NaN). Keeps every downstream path — classical, SegFormer, CanonCGT — safe.
     src_enc = np.nan_to_num(np.clip(np.asarray(src_enc, dtype=np.float64), 0.0, 1.0))
@@ -58,6 +64,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     if look == "ai_grade":
         try:
             from . import canoncgt as cg_mod
+            _p(0.35, "AI cinematic grade")
             lut = cg_mod.canon_lut(src_enc, tgt_enc, tf, size=size,
                                    lattice_L=lattice_L, seed=seed)
         except Exception:
@@ -123,6 +130,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)
     else:
         # Different scenes / not aligned: match the colour DISTRIBUTIONS.
+        _p(0.10, "Matching colour distributions")
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)  # linear
         transported = np.clip(tf_mod.fit_idt(Sf_lin, Tf_lin, seed=seed), 0.0, None)  # nonlinear
         lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
@@ -132,6 +140,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         if neural:
             try:
                 from . import neural as nn_mod
+                _p(0.35, "AI scene analysis")
                 nctx = nn_mod.prepare(src_enc, tgt_enc, tf, size=size,
                                       lattice_L=lattice_L, seed=seed)
                 if nctx is not None:
@@ -140,6 +149,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
                 nctx = None
 
     # Score every candidate LUT on exactly what it will output.
+    _p(0.62, "Scoring candidates")
     scores = {}
     if corresponded:
         metric = "dE00"
@@ -172,6 +182,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     if not corresponded and refine and nctx is not None:
         try:
             from . import neural as nn_mod
+            _p(0.80, "Fine-tuning the match")
             applied_enc = apply_lut(src_enc, res.lut)
             ctx2 = nn_mod.prepare(applied_enc, tgt_enc, tf, size=size,
                                   lattice_L=lattice_L, seed=seed)
@@ -203,6 +214,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     else:
         res.notes.append("Distribution mode: matched colour distributions "
                          "(no per-pixel ground truth).")
+    _p(1.0, "Match complete")
     return res
 
 

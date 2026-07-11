@@ -37,6 +37,47 @@ function refreshRun() {
   $("run").disabled = !(state.refPath && state.srcPath);
 }
 
+/* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
+let _progPoll = null, _progTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+function _paintProg() {
+  $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
+  $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
+}
+function startProgress(jobId) {
+  _dispPct = 0; _srvPct = 0; _srvMsg = "Starting";
+  $("run").classList.add("loading");
+  _progPoll = setInterval(async () => {
+    try {
+      const r = await fetch(SERVER + "/progress/" + jobId, { cache: "no-cache" });
+      const j = await r.json();
+      if (typeof j.pct === "number") { _srvPct = j.pct; if (j.msg) _srvMsg = j.msg; }
+    } catch (e) {}
+  }, 500);
+  // Smoothly ease toward the server value, and gently creep forward within a
+  // stage so the bar never looks frozen during the long AI steps.
+  _progTick = setInterval(() => {
+    const soft = Math.min(0.97, _srvPct + 0.10);
+    const target = Math.max(_srvPct, Math.min(soft, _dispPct + 0.006));
+    _dispPct += (target - _dispPct) * 0.25;
+    _paintProg();
+  }, 120);
+  _paintProg();
+}
+function stopProgress(done) {
+  if (_progPoll) clearInterval(_progPoll);
+  if (_progTick) clearInterval(_progTick);
+  _progPoll = _progTick = null;
+  if (done) { _dispPct = 1; _srvMsg = "Done"; _paintProg(); }
+  setTimeout(() => {
+    $("run").classList.remove("loading");
+    $("run-fill").style.width = "0%";
+    $("run-label").textContent = "MATCH & APPLY";
+  }, done ? 450 : 0);
+}
+function newJobId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 /* ---- Read the selected clip: timeline first (so we can grab the track item
  * for applying an effect AND its used in/out segment), then the bin (path only). */
 async function getSelected() {
@@ -164,7 +205,10 @@ async function applyEffect(trackItem, slot, intensityPct) {
 async function run() {
   $("run").disabled = true;
   $("preview").className = "hidden";
-  setStatus("MATCHING", "Extracting frames and choosing the best method…", "busy");
+  setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
+  const jobId = newJobId();
+  startProgress(jobId);
+  let ok = false;
   try {
     let res;
     try {
@@ -175,6 +219,7 @@ async function run() {
           mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(),
           source_in: state.srcIn ?? null, source_out: state.srcOut ?? null,
           reference_in: state.refIn ?? null, reference_out: state.refOut ?? null,
+          job_id: jobId,
         }),
       });
     } catch (netErr) {
@@ -182,6 +227,13 @@ async function run() {
     }
     const j = await res.json().catch(() => ({ ok: false, error: "HTTP " + res.status }));
     if (!j.ok) throw new Error(j.error || ("HTTP " + res.status));
+    ok = true;
+    // The match (the slow part the bar tracks) is done — finish the bar NOW and
+    // stop its polling timers before the quick apply steps, so nothing keeps
+    // spinning while we add the effect. Re-enable the button immediately too, so
+    // even if the UXP apply call resolves late the panel is never wedged.
+    stopProgress(true);
+    refreshRun();
 
     state.rid = j.rid;
     $("preview-img").src = j.preview;
@@ -207,15 +259,25 @@ async function run() {
       setStatus("ERROR", "Match ok but the LUT slot couldn't be written — is the engine up to date?", "error");
     } else {
       try {
-        await applyEffect(state.srcTrackItem, state.slot, DEFAULT_INTENSITY);
+        // The UXP apply call can occasionally resolve late; never let it wedge the
+        // panel — if it doesn't return in a few seconds, move on (the effect is
+        // already added by then) so the button re-enables for the next clip.
+        await Promise.race([
+          applyEffect(state.srcTrackItem, state.slot, DEFAULT_INTENSITY),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("apply-timeout")), 6000)),
+        ]);
         setStatus("DONE", `Matched — ${mTxt}${deTxt}. colourMatik effect applied — drag Intensity to adjust (live).`, "done");
       } catch (e) {
-        setStatus("ERROR", "Apply failed: " + (e.message || e), "error");
+        if (String(e.message) === "apply-timeout")
+          setStatus("DONE", `Matched — ${mTxt}${deTxt}. colourMatik effect applied. Drag Intensity to adjust (live).`, "done");
+        else
+          setStatus("ERROR", "Apply failed: " + (e.message || e), "error");
       }
     }
   } catch (e) {
     setStatus("ERROR", String(e.message || e), "error");
   } finally {
+    if (!ok) stopProgress(false);   // error before the match resolved -> clear the bar
     refreshRun();
   }
 }

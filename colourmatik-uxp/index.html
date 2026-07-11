@@ -51,11 +51,21 @@
     .seg-btn.selected { background: #1473e6; color: #ffffff; }
 
     .primary {
+      position: relative; overflow: hidden;
       box-sizing: border-box; width: 100%; padding: 10px 0; border: 0; border-radius: 4px;
       background: #1473e6; color: #ffffff; font-size: 12px; font-weight: 700;
       letter-spacing: 0.3px; text-align: center; cursor: pointer;
     }
-    .primary:disabled { opacity: 0.45; cursor: default; }
+    .primary:disabled { cursor: default; }
+    .primary.loading { background: #2a2f37; opacity: 1; }        /* darker track while a fill grows */
+    /* the growing progress fill (behind the label) */
+    #run-fill {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+      background: #1473e6; border-radius: 4px 0 0 4px;
+      transition: width 0.35s ease;
+    }
+    #run-label { position: relative; z-index: 1; }
+    .primary:disabled:not(.loading) { opacity: 0.45; }
 
     #intensity-section.hidden { display: none; }
     .intensity-head {
@@ -146,7 +156,10 @@
     </div>
   </div>
 
-  <button class="primary" id="run" disabled>MATCH &amp; APPLY</button>
+  <button class="primary" id="run" disabled>
+    <span id="run-fill"></span>
+    <span id="run-label">MATCH &amp; APPLY</span>
+  </button>
 
   <div id="intensity-section" class="section hidden" style="margin-top: 14px;">
     <div class="intensity-head">
