@@ -82,7 +82,7 @@ def _resize(enc: np.ndarray, max_side: int) -> np.ndarray:
 
 
 def canon_lut(src_enc: np.ndarray, ref_enc: np.ndarray, tf: str, *,
-              size: int = 65, lattice_L: int = 25, max_side: int = 512,
+              size: int = 65, lattice_L: int = 25, max_side: int = 768,
               seed: int = 0) -> "np.ndarray | None":
     """Run CanonCGT on (src, ref) and bake its recolouring into a size^3 LUT.
     Returns the LUT (indexed [r,g,b]) or None if the model isn't available."""

@@ -61,7 +61,10 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
     if t is None:
         t = (dur / 2.0) if dur else 0.5
     elif dur:
-        t = max(0.0, min(float(t), dur - 1e-3))    # clamp a user time into the clip
+        # clamp into the clip, staying a frame's-worth clear of the end (seeking to
+        # the very last millisecond yields no frame on most codecs)
+        margin = 0.1 if dur > 1.0 else max(1e-3, dur * 0.1)
+        t = max(0.0, min(float(t), dur - margin))
     else:
         t = max(0.0, float(t))
     with tempfile.TemporaryDirectory() as tmp:
@@ -85,19 +88,33 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
         return load_image(out)
 
 
-def extract_frames(video: str | Path, n: int = 3) -> np.ndarray:
+def extract_frames(video: str | Path, n: int = 3,
+                   start: float | None = None, end: float | None = None) -> np.ndarray:
     """Extract `n` frames spread across the clip and stack them vertically.
 
     Pooling several frames gives a more representative colour distribution than a
     single frame (motion, exposure drift). Frames are stacked in the SAME temporal
-    order for both clips, so pixel correspondence is preserved for aligned shots."""
-    if n <= 1:
-        return extract_frame(video)
+    order for both clips, so pixel correspondence is preserved for aligned shots.
+
+    `start`/`end` (seconds) restrict sampling to the SEGMENT actually used on the
+    timeline — long source files often contain several unrelated scenes, and
+    sampling the whole file badly skews the colour distribution."""
     dur = _probe_duration(video)
+    lo, hi = 0.0, dur if dur else None
+    if dur:
+        margin = 0.2 if dur > 1.0 else 0.0   # stay clear of the very end (no frame there)
+        if start is not None:
+            lo = max(0.0, min(float(start), max(0.0, dur - margin)))
+        if end is not None:
+            hi = max(lo + 1e-3, min(float(end), dur))
+    if n <= 1:
+        mid = ((lo + hi) / 2.0) if hi is not None else None
+        return extract_frame(video, mid)
     if not dur:
         return extract_frame(video)
-    # sample at interior points, avoiding the very first/last frame
-    times = [dur * (i + 1) / (n + 1) for i in range(n)]
+    # sample at interior points of the range, avoiding the very first/last frame
+    span = hi - lo
+    times = [lo + span * (i + 1) / (n + 1) for i in range(n)]
     frames = [extract_frame(video, t) for t in times]
     h = min(f.shape[0] for f in frames)
     w = min(f.shape[1] for f in frames)
@@ -105,11 +122,12 @@ def extract_frames(video: str | Path, n: int = 3) -> np.ndarray:
     return np.concatenate(frames, axis=0)
 
 
-def load_any(path: str | Path, t: float | None = None, frames: int = 1) -> np.ndarray:
+def load_any(path: str | Path, t: float | None = None, frames: int = 1,
+             start: float | None = None, end: float | None = None) -> np.ndarray:
     """Load an image, or extract frame(s) from a video, into encoded float RGB."""
     ext = Path(path).suffix.lower()
     if ext in VIDEO_EXTS:
-        if t is not None or frames <= 1:
+        if t is not None:
             return extract_frame(path, t)
-        return extract_frames(path, frames)
+        return extract_frames(path, frames, start=start, end=end)
     return load_image(path)

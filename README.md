@@ -64,6 +64,27 @@ with `./colourmatik-app`.
 **Updating:** double-click **`update.command`** (in the installed `~/colourMatik` folder) — it pulls the
 latest and reinstalls. **Removing:** double-click **`uninstall.command`**.
 
+## Install (Windows 10/11, x64) — beta
+
+> The Windows port ships the same engine, panel and effect. It has not yet been
+> verified on a Windows machine — please report anything odd.
+
+1. **Code ▸ Download ZIP** (or `git clone`) this repo, extract it.
+2. Double-click **`windows\install-windows.cmd`** — it installs Python 3.11 / git / ffmpeg
+   (via winget), the engine + AI, the Premiere panel, the native effect (downloaded from the
+   latest release), and auto-starts the engine at login. Approve the one admin prompt
+   (Premiere's shared plug-ins folder).
+3. **Restart Premiere Pro** → *Window ▸ UXP Plugins ▸ colourMatik*.
+
+**Updating:** `windows\update-windows.cmd` · **Removing:** `windows\uninstall-windows.cmd` ·
+**Engine console (debug):** `windows\colourmatik-app.cmd`
+
+*Building the Windows effect yourself:* the `.aex` is compiled by the
+[`windows-effect`](.github/workflows/windows-effect.yml) GitHub Action — run it manually and
+paste a download URL for Adobe's **Windows** After Effects SDK zip (Adobe's license doesn't
+allow us to bundle the SDK). The action reuses the SDK's own sample project, so Adobe's
+official PiPL build steps apply unmodified.
+
 ## Use it (2 clicks)
 
 1. Open **Window ▸ UXP Plugins ▸ colourMatik**.

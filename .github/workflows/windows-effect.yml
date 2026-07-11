@@ -1,0 +1,77 @@
+# Build the native colourMatik effect (.aex) for Windows Premiere Pro / After Effects.
+#
+# The After Effects SDK is Adobe-licensed and NOT stored in this repo. Run this
+# workflow manually and paste a download URL for the WINDOWS SDK zip
+# (e.g. AfterEffectsSDK_25.x_win.zip from adobe.io, re-hosted on your own Drive/Dropbox
+# as a direct-download link). Strategy mirrors the macOS build: our sources are
+# copied over the SDK's Gamma_Table sample project, then msbuild compiles it —
+# so Adobe's own PiPL custom-build steps (cl /EP -> cnvtpipl.exe -> .rc) are used
+# unmodified.
+name: windows-effect
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_url:
+        description: "Direct-download URL of the Adobe After Effects SDK (Windows) zip"
+        required: true
+      release_tag:
+        description: "Optional: existing release tag to attach colourMatik-effect-windows.zip to (e.g. v1.1.0)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download + extract the AE SDK (Windows)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ inputs.sdk_url }}" -OutFile sdk.zip -UseBasicParsing
+          Expand-Archive sdk.zip -DestinationPath sdk
+          $proj = Get-ChildItem sdk -Recurse -Filter "Gamma_Table.vcxproj" | Select-Object -First 1
+          if (-not $proj) { throw "Gamma_Table.vcxproj not found - is this the WINDOWS SDK zip?" }
+          "SAMPLE_DIR=$($proj.Directory.Parent.FullName)" >> $env:GITHUB_ENV
+          "PROJ=$($proj.FullName)" >> $env:GITHUB_ENV
+
+      - name: Stage colourMatik sources over the sample (same trick as the macOS build)
+        shell: pwsh
+        run: |
+          Copy-Item colourmatik-fx/colourMatik.h   "$env:SAMPLE_DIR/colourMatik.h" -Force
+          Copy-Item colourmatik-fx/colourMatik.cpp "$env:SAMPLE_DIR/Gamma_Table.cpp" -Force
+          Copy-Item colourmatik-fx/colourMatikPiPL.r "$env:SAMPLE_DIR/Gamma_TablePiPL.r" -Force
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Build
+        shell: pwsh
+        run: |
+          msbuild "$env:PROJ" /m /p:Configuration=Debug /p:Platform=x64 `
+            /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 `
+            /p:TreatWarningsAsErrors=false
+          $aex = Get-ChildItem "$env:SAMPLE_DIR" -Recurse -Include *.aex |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $aex) { $aex = Get-ChildItem sdk -Recurse -Include *.aex |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
+          if (-not $aex) { throw "No .aex produced - check the build log above." }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $aex.FullName out/colourMatik.aex
+          Compress-Archive -Force out/colourMatik.aex out/colourMatik-effect-windows.zip
+          Write-Host "Built: $($aex.FullName) -> out/colourMatik.aex"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colourMatik-effect-windows
+          path: out/colourMatik-effect-windows.zip
+
+      - name: Attach to release (optional)
+        if: ${{ inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.release_tag }}" out/colourMatik-effect-windows.zip --clobber

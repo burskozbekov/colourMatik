@@ -13,7 +13,8 @@ const UPDATE_URL = "https://catheadai.com/colourmatik/version.json";
 const SITE_URL = "https://catheadai.com";
 
 const $ = (id) => document.getElementById(id);
-const state = { refPath: null, srcPath: null, srcTrackItem: null, rid: null, slot: null };
+const state = { refPath: null, srcPath: null, srcTrackItem: null, rid: null, slot: null,
+                refIn: null, refOut: null, srcIn: null, srcOut: null };
 let bakeTimer = null;
 
 function setStatus(stateLabel, msg, kind) {
@@ -35,7 +36,7 @@ function refreshRun() {
 }
 
 /* ---- Read the selected clip: timeline first (so we can grab the track item
- * for applying an effect), then the project bin (path only). ---------------- */
+ * for applying an effect AND its used in/out segment), then the bin (path only). */
 async function getSelected() {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("No project is open.");
@@ -49,7 +50,20 @@ async function getSelected() {
         const pi = await c.getProjectItem();
         const clip = ppro.ClipProjectItem.cast(pi);
         const p = clip ? await clip.getMediaFilePath() : null;
-        if (p) return { path: p, trackItem: c };
+        if (p) {
+          // The segment actually used in the edit (source-media seconds). Long
+          // source files hold many scenes — sampling only this range is what
+          // makes the match reflect the shot you're grading.
+          let inS = null, outS = null;
+          try {
+            const ti = await c.getInPoint();
+            const to = await c.getOutPoint();
+            if (ti && typeof ti.seconds === "number" && isFinite(ti.seconds)) inS = ti.seconds;
+            if (to && typeof to.seconds === "number" && isFinite(to.seconds)) outS = to.seconds;
+            if (inS != null && outS != null && outS - inS < 0.04) { inS = null; outS = null; }
+          } catch (e) {}
+          return { path: p, trackItem: c, inS, outS };
+        }
       }
     }
   }
@@ -57,18 +71,19 @@ async function getSelected() {
   const items = sel ? await sel.getItems() : [];
   for (const it of items) {
     const clip = ppro.ClipProjectItem.cast(it);
-    if (clip) { const p = await clip.getMediaFilePath(); if (p) return { path: p, trackItem: null }; }
+    if (clip) { const p = await clip.getMediaFilePath(); if (p) return { path: p, trackItem: null, inS: null, outS: null }; }
   }
-  return { path: null, trackItem: null };
+  return { path: null, trackItem: null, inS: null, outS: null };
 }
 
-function baseName(p) { return p ? p.split("/").pop() : ""; }
+function baseName(p) { return p ? p.split(/[\\/]/).pop() : ""; }   // mac + windows paths
 
 async function captureRef() {
   try {
     const s = await getSelected();
     if (!s.path) return setStatus("SELECT", "Select the reference clip (bin or timeline), then click again.", "error");
     state.refPath = s.path;
+    state.refIn = s.inS; state.refOut = s.outS;
     $("refName").textContent = baseName(s.path);
     $("refName").className = "slot-name set";
     refreshRun();
@@ -82,6 +97,7 @@ async function captureSrc() {
     if (!s.path) return setStatus("SELECT", "Select the target clip on the timeline, then click again.", "error");
     state.srcPath = s.path;
     state.srcTrackItem = s.trackItem;   // needed to apply the effect
+    state.srcIn = s.inS; state.srcOut = s.outS;
     state.slot = null;                  // a new target invalidates the prior match's slot
     $("intensity-section").className = "section hidden";   // intensity inert until a fresh match
     $("srcName").textContent = baseName(s.path) + (s.trackItem ? "" : "  (not on timeline)");
@@ -154,7 +170,9 @@ async function run() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_path: state.srcPath, reference_path: state.refPath,
-          mode: currentMode(), tf: "sRGB", frames: 3, look: currentLook(),
+          mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(),
+          source_in: state.srcIn ?? null, source_out: state.srcOut ?? null,
+          reference_in: state.refIn ?? null, reference_out: state.refOut ?? null,
         }),
       });
     } catch (netErr) {

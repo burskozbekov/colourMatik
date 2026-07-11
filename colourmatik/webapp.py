@@ -5,7 +5,9 @@ Everything stays on your machine; nothing is uploaded anywhere.
 """
 from __future__ import annotations
 import base64
+import os
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -58,12 +60,20 @@ def _remember(rid: str, cube: Path, job: dict | None = None) -> None:
         while len(_JOBS) > _MAX_CACHE:
             _JOBS.pop(next(iter(_JOBS)), None)
 
+# Per-user application-support root: macOS ~/Library/Application Support,
+# Windows %APPDATA% (Roaming). Everything the engine writes lives under these.
+if sys.platform == "win32":
+    _APP_SUPPORT = Path(os.environ.get("APPDATA",
+                                       str(Path.home() / "AppData" / "Roaming")))
+else:
+    _APP_SUPPORT = Path.home() / "Library/Application Support"
+
 # Premiere scans these at launch; we drop the LUT here so it shows in the
 # Lumetri Input-LUT / Creative-Look dropdowns (folder names drift across installs).
 _LUT_DIRS = [
-    Path.home() / "Library/Application Support/Adobe/Common/LUTs/Creative",
-    Path.home() / "Library/Application Support/Adobe/Common/LUTs/Technical",
-    Path.home() / "Library/Application Support/Adobe/Common/LUTs/Input",
+    _APP_SUPPORT / "Adobe/Common/LUTs/Creative",
+    _APP_SUPPORT / "Adobe/Common/LUTs/Technical",
+    _APP_SUPPORT / "Adobe/Common/LUTs/Input",
 ]
 
 
@@ -80,9 +90,9 @@ def _install_lut(lut, tf: str, name: str = "colourMatik") -> None:
 # The native "colourMatik" effect reads its 33^3 LUT from a per-match "slot" file
 # here. A NEW slot number each call is what makes the effect reload (it caches by
 # slot), so the panel just points the effect's Slot param at the returned number.
-_SLOT_DIR = Path.home() / "Library/Application Support/colourMatik"
+_SLOT_DIR = _APP_SUPPORT / "colourMatik"
 _SLOT_COUNTER = _SLOT_DIR / ".next_slot"
-_EFFECT_LUT_SIZE = 33  # must match CM_LUT_SIZE in the native effect
+_EFFECT_LUT_SIZE = 65  # must be <= CM_LUT_MAX in the native effect (65 since v1.1)
 
 
 def _next_slot() -> int:
@@ -111,7 +121,9 @@ _METHOD_LABELS = {
 
 
 def _method_label(m: str) -> str:
-    return _METHOD_LABELS.get(m, m)
+    base, _, suffix = m.partition("+")
+    label = _METHOD_LABELS.get(base, base)
+    return label + (" + fine-tune" if suffix == "refine" else "")
 
 
 def _preview_dataurl(ref1, src1, matched1, tf, corresponded, job: Path) -> tuple[str, dict | None, dict | None]:
@@ -138,21 +150,24 @@ def index() -> str:
 
 
 def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
-             job: Path, title: str, look: str = "exact") -> dict:
+             job: Path, title: str, look: str = "exact",
+             src_range: tuple | None = None, ref_range: tuple | None = None) -> dict:
     corresponded = (mode == "same")
-    # Frame pooling (3 stacked frames) helps the classical distribution methods, but the
+    # Frame pooling (stacked frames) helps the classical distribution methods, but the
     # learned look-transfer (CanonCGT) analyses ONE coherent image — give it a single frame.
     f = 1 if look == "ai_grade" else frames
-    src = cmio.load_any(src_path, frames=f)
-    ref = cmio.load_any(ref_path, frames=f)
+    si, so = src_range or (None, None)
+    ri, ro = ref_range or (None, None)
+    src = cmio.load_any(src_path, frames=f, start=si, end=so)
+    ref = cmio.load_any(ref_path, frames=f, start=ri, end=ro)
     res = match(src, ref, corresponded=corresponded, tf=tf, look=look)
 
     cube = job / "colourMatik.cube"
     write_cube(cube, res.lut, title=title)
     _install_lut(res.lut, tf)  # expose in Premiere LUT dropdowns (visible after next launch)
 
-    src1 = cmio.load_any(src_path, frames=1)
-    ref1 = cmio.load_any(ref_path, frames=1)
+    src1 = cmio.load_any(src_path, frames=1, start=si, end=so)
+    ref1 = cmio.load_any(ref_path, frames=1, start=ri, end=ro)
     matched1 = apply_lut(src1, res.lut)
     preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
 
@@ -165,7 +180,7 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
         "report": format_report(res),
         "method": res.method,
         "method_label": _method_label(res.method),
-        "ai_used": res.method in ("neural", "canon"),
+        "ai_used": res.method.startswith(("neural", "canon")),
         "metric": res.score_metric,
         "scores": res.scores,
         "de_before": db,
@@ -199,8 +214,14 @@ class PathReq(BaseModel):
     reference_path: str
     mode: str = "different"
     tf: str = "sRGB"
-    frames: int = 3
+    frames: int = 7            # frames pooled per clip (sampling variance dominates accuracy)
     look: str = "exact"        # "exact" = accuracy contest; "ai_grade" = CanonCGT look
+    # Timeline segment (seconds, source-media-relative). When the panel sends the
+    # track item's in/out, sampling stays inside the part actually used in the edit.
+    source_in: float | None = None
+    source_out: float | None = None
+    reference_in: float | None = None
+    reference_out: float | None = None
 
 
 @app.post("/match_paths")
@@ -215,7 +236,9 @@ def match_paths(req: PathReq):
         if not src.exists() or not ref.exists():
             return JSONResponse({"ok": False, "error": "file not found"}, status_code=400)
         return JSONResponse(_process(src, ref, req.mode, req.tf, req.frames, job,
-                                     f"colourMatik {src.stem}", look=req.look))
+                                     f"colourMatik {src.stem}", look=req.look,
+                                     src_range=(req.source_in, req.source_out),
+                                     ref_range=(req.reference_in, req.reference_out)))
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
@@ -312,8 +335,8 @@ class EffectLutReq(BaseModel):
 
 @app.post("/effect_lut")
 def effect_lut(req: EffectLutReq):
-    """Write the match as a 33^3 .cube into a fresh slot the native colourMatik
-    effect reads. Returns the slot number for the panel to set on the effect."""
+    """Write the match as a 65^3 .cube into a fresh slot the native colourMatik
+    effect reads (full engine precision). Returns the slot number for the panel."""
     j = _JOBS.get(req.rid)
     if j is None:
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
@@ -321,10 +344,10 @@ def effect_lut(req: EffectLutReq):
         lut = j["lut"]
         if req.intensity != 1.0:
             lut = apply_intensity(lut, float(req.intensity))
-        lut33 = resample_lut(lut, _EFFECT_LUT_SIZE)
+        lut_fx = resample_lut(lut, _EFFECT_LUT_SIZE)
         slot = _next_slot()
         path = _SLOT_DIR / f"slot_{slot}.cube"
-        write_cube(path, lut33, title=f"colourMatik slot {slot}")
+        write_cube(path, lut_fx, title=f"colourMatik slot {slot}")
         return {"ok": True, "slot": slot, "path": str(path)}
     except Exception as e:
         traceback.print_exc()
