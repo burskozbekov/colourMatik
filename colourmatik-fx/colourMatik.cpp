@@ -75,6 +75,17 @@ static int cm_load_lut(A_long slot, ColourMatikSeq *seq) {
 
 static inline float cm_clampf(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
+// Per-pixel hash noise in [-0.5, 0.5). Used to jitter the 8-bit INPUT by one
+// LSB before sampling the LUT: a strong match stretches dark gradients (night
+// skies), turning 8-bit steps into visible bands/posterisation ("moire").
+// Jittering the input breaks those contours into fine, film-like grain. The
+// same value is used for R,G,B (luma-correlated) so it never adds colour noise.
+static inline float cm_hash_noise(A_long x, A_long y) {
+	unsigned h = (unsigned)x * 73856093u ^ (unsigned)y * 19349663u;
+	h = (h ^ (h >> 13)) * 1274126177u;
+	return (float)((h >> 8) & 0xFFFF) / 65535.0f - 0.5f;
+}
+
 // Trilinear sample of an S^3 LUT at (r,g,b) in [0,1]. idx = r + g*S + b*S*S.
 // S must be >= 2 (callers only sample a fully published LUT, but keep the guard).
 static void cm_sample(const float *lut, int S, float r, float g, float b, float out[3]) {
@@ -131,7 +142,10 @@ static void cm_trace(const char *fmtstr, ...) {
 // ------------------------------------------------------------ AE 8-bit ARGB path
 static PF_Err cm_pixel(void *refcon, A_long x, A_long y, PF_Pixel *inP, PF_Pixel *outP) {
 	CM_Info *info = (CM_Info *)refcon;
-	float r = inP->red / 255.f, g = inP->green / 255.f, b = inP->blue / 255.f;
+	float d = cm_hash_noise(x, y) / 255.f;   // anti-banding input jitter
+	float r = cm_clampf(inP->red / 255.f + d);
+	float g = cm_clampf(inP->green / 255.f + d);
+	float b = cm_clampf(inP->blue / 255.f + d);
 	float o[3];
 	cm_sample(info->seq->lut, info->seq->size, r, g, b, o);
 	float t = info->t;
@@ -200,7 +214,11 @@ static PF_Err cm_render_bgra_8u(PF_InData *in_data, PF_EffectWorld *src, PF_Effe
 		const unsigned char *ip = (const unsigned char *)CM_ROW(src->data, y, src->rowbytes);
 		unsigned char *op = (unsigned char *)CM_ROW(dst->data, y, dst->rowbytes);
 		for (A_long x = 0; x < width; x++) {
-			float b = ip[0] / 255.f, g = ip[1] / 255.f, r = ip[2] / 255.f;
+			// one-LSB input jitter: kills banding/posterisation on stretched gradients
+			float d = cm_hash_noise(x, y) / 255.f;
+			float b = cm_clampf(ip[0] / 255.f + d);
+			float g = cm_clampf(ip[1] / 255.f + d);
+			float r = cm_clampf(ip[2] / 255.f + d);
 			float o[3];
 			cm_sample(lut, S, r, g, b, o);
 			op[0] = (unsigned char)(cm_clampf(b + t * (o[2] - b)) * 255.f + 0.5f);

@@ -69,12 +69,15 @@ latest and reinstalls. **Removing:** double-click **`uninstall.command`**.
 > The Windows port ships the same engine, panel and effect. It has not yet been
 > verified on a Windows machine — please report anything odd.
 
-1. **Code ▸ Download ZIP** (or `git clone`) this repo, extract it.
-2. Double-click **`windows\install-windows.cmd`** — it installs Python 3.11 / git / ffmpeg
-   (via winget), the engine + AI, the Premiere panel, the native effect (downloaded from the
-   latest release), and auto-starts the engine at login. Approve the one admin prompt
-   (Premiere's shared plug-ins folder).
+**Easiest — one file, double-click (like the Mac installer):**
+1. Download **[colourMatik-Setup-Windows.cmd](https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup-Windows.cmd)** from the latest release.
+2. Double-click it. (If SmartScreen warns: *More info ▸ Run anyway* — the effect itself is
+   CI-built from this repo.) It downloads the latest colourMatik and installs everything:
+   Python 3.11 / git / ffmpeg (winget), engine + AI, the Premiere panel, the native effect,
+   and engine autostart. Approve the one admin prompt (Premiere's shared plug-ins folder).
 3. **Restart Premiere Pro** → *Window ▸ UXP Plugins ▸ colourMatik*.
+
+*(Manual alternative: Code ▸ Download ZIP → run `windows\install-windows.cmd`.)*
 
 **Updating:** `windows\update-windows.cmd` · **Removing:** `windows\uninstall-windows.cmd` ·
 **Engine console (debug):** `windows\colourmatik-app.cmd`

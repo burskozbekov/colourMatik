@@ -7,7 +7,7 @@ const ppro = require("premierepro");
 const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
-const DEFAULT_INTENSITY = 130;   // default match is a touch punchy; dial down with the slider
+const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
 const LOCAL_VERSION = "1.1.0";
 // Update checks read version.json straight from the GitHub repo (always hosted,
 // CORS-friendly). Bump version.json + this constant together on each release.
