@@ -13,16 +13,25 @@ import imageio.v3 as iio
 _FFMPEG: str | None = None
 
 
+def _works(exe: str) -> bool:
+    """A binary on PATH may be broken (wrong arch, corrupt) — trust it only if
+    `-version` actually runs."""
+    try:
+        return subprocess.run([exe, "-version"], capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
 def _ffmpeg_exe() -> str:
     global _FFMPEG
     if _FFMPEG is None:
         p = shutil.which("ffmpeg")
-        if not p:
+        if not (p and _works(p)):
             try:
                 from imageio_ffmpeg import get_ffmpeg_exe
                 p = get_ffmpeg_exe()
             except Exception:
-                p = "ffmpeg"
+                p = p or "ffmpeg"
         _FFMPEG = p
     return _FFMPEG
 
