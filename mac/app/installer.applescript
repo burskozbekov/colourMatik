@@ -2,6 +2,10 @@
 -- Signed with Developer ID Application and notarized, so it opens with no warning.
 -- Asks for the admin password once, then shows a LIVE progress bar (percent + stage)
 -- while the install runs, by reading /tmp/colourMatik-progress ("PCT|CAP|message").
+--
+-- NOTE: the installer is launched with a plain "&" + stdin closed — NOT nohup.
+-- nohup breaks inside "with administrator privileges" ("can't detach from console")
+-- and the install never starts. The plain-& detach is verified to survive this app.
 
 set myPath to path to me
 set scriptPOSIX to POSIX path of ((myPath as text) & "Contents:Resources:install-mac.sh")
@@ -24,7 +28,7 @@ set launchStamp to (do shell script "date +%s") as integer
 
 -- One admin prompt; the installer then runs detached (as root) so this app is free
 -- to show the progress window.
-do shell script "/usr/bin/nohup /bin/bash " & quoted form of scriptPOSIX & " >/tmp/colourMatik-install.log 2>&1 &" with administrator privileges
+do shell script "/bin/bash " & quoted form of scriptPOSIX & " </dev/null >>/tmp/colourMatik-install.log 2>&1 &" with administrator privileges
 
 -- Live progress window ---------------------------------------------------------
 set progress total steps to 100
@@ -34,10 +38,11 @@ set progress additional description to "Starting…"
 
 set shownPct to 1
 set stagePct to 1
-set stageCap to 5
+set stageCap to 4
 set stageMsg to "Starting…"
 set failMsg to ""
 set doneOK to false
+set sawProgress to false
 set idleTicks to 0
 set maxTicks to 3600 -- 2 s per tick = 2 hours hard stop
 
@@ -64,6 +69,7 @@ try
 					set newPct to p1 as integer
 					set newCap to (item 2 of parts) as integer
 					set newMsg to item 3 of parts
+					set sawProgress to true
 					if newPct ≥ 100 then
 						set doneOK to true
 						exit repeat
@@ -79,6 +85,9 @@ try
 				end try
 			end if
 		end if
+		-- watchdog: if the installer hasn't reported ANYTHING within 90 s, it never
+		-- started — say so loudly instead of sitting on a fake bar forever.
+		if (not sawProgress) and tick ≥ 45 then exit repeat
 		-- creep: keep the bar visibly alive inside a long stage (1 % / ~14 s, capped)
 		set idleTicks to idleTicks + 1
 		if idleTicks ≥ 7 and shownPct < (stageCap - 1) then
@@ -89,10 +98,12 @@ try
 		set progress additional description to stageMsg & "  (" & shownPct & "%)"
 	end repeat
 on error number -128
-	-- user clicked Stop: the install keeps running in the background
-	display dialog "The installer window was closed, but the install keeps running in the background.
+	-- user clicked Stop
+	if sawProgress then
+		display dialog "The installer window was closed, but the install keeps running in the background.
 
 You'll get a notification when it's ready (about 10–20 minutes). Then restart Premiere Pro." buttons {"OK"} default button 1 with title "colourMatik" with icon note
+	end if
 	return
 end try
 
@@ -110,6 +121,10 @@ else if failMsg is not "" then
 Problem: " & failMsg & "
 
 Check your internet connection and run the installer again. Details: /tmp/colourMatik-install.log" buttons {"OK"} default button 1 with title "colourMatik" with icon stop
+else if not sawProgress then
+	display dialog "The installer couldn't start.
+
+Please run the installer again. If it happens twice, send me the file /tmp/colourMatik-install.log" buttons {"OK"} default button 1 with title "colourMatik" with icon stop
 else
 	display dialog "The install is taking unusually long, but may still be running in the background.
 

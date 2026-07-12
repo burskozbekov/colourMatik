@@ -14,6 +14,17 @@ exec > >(tee -a "$LOG") 2>&1
 echo "== colourMatik install $(date) =="
 
 prog() { echo "$1|$2|$3" > "$PROGRESS"; chmod 644 "$PROGRESS" 2>/dev/null || true; }
+
+# If this script dies ANYWHERE unexpectedly, surface it on the progress bar —
+# the app must never sit on a frozen bar with nothing actually running.
+on_exit() {
+  code=$?
+  if [ "$code" -ne 0 ] && ! /usr/bin/grep -q '^FAIL' "$PROGRESS" 2>/dev/null; then
+    prog FAIL 0 "install stopped unexpectedly (code $code) — see /tmp/colourMatik-install.log"
+  fi
+}
+trap on_exit EXIT
+
 prog 2 5 "Starting…"
 
 CONSOLE_USER="$(/usr/bin/stat -f%Su /dev/console)"
