@@ -13,6 +13,10 @@ on:
       - "windows/setup/**"
       - ".github/workflows/windows-setup.yml"
 
+# needed so the release-attach step can replace existing assets
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
