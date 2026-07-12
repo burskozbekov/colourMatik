@@ -1,0 +1,45 @@
+# Build the one-click Windows installer colourMatik-Setup.exe (NSIS) on a Windows
+# runner (NSIS is reliable there) and attach it to a release.
+name: windows-setup
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to attach colourMatik-Setup.exe to (e.g. v1.2.0)"
+        required: false
+        default: ""
+  push:
+    paths:
+      - "windows/setup/**"
+      - ".github/workflows/windows-setup.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build Setup.exe
+        shell: pwsh
+        run: |
+          cd windows/setup
+          # ensure the icon is next to the script
+          Copy-Item ../../assets/icons/colourMatik.ico ./colourMatik.ico -Force
+          & "C:\Program Files (x86)\NSIS\makensis.exe" colourMatik.nsi
+          if (-not (Test-Path colourMatik-Setup.exe)) { throw "Setup.exe not produced" }
+          Write-Host "Built colourMatik-Setup.exe ($((Get-Item colourMatik-Setup.exe).Length) bytes)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: colourMatik-Setup
+          path: windows/setup/colourMatik-Setup.exe
+
+      - name: Attach to release
+        if: ${{ inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.release_tag }}" windows/setup/colourMatik-Setup.exe --clobber
