@@ -40,10 +40,11 @@ difference; **< 1 = the eye can't tell**). Verified against an independent `.cub
 
 ## Install (macOS, Apple Silicon)
 
-**Easiest — notarized installer (no warnings):**
-1. Download **[colourMatik‑Installer.zip](https://github.com/burskozbekov/colourMatik/releases/latest)** from the latest release.
-2. Double‑click to unzip, then double‑click **colourMatik Installer**.
-3. Follow the prompts (Mac password once for Homebrew; the AI download takes a few minutes), then **restart Premiere Pro**.
+**Easiest — one file, double-click (notarized, no warnings):**
+1. Download **[colourMatik-Installer-Mac.zip](https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Installer-Mac.zip)** from the latest release.
+2. It unzips itself on download — double-click **colourMatik Installer**.
+3. Enter your Mac password once. It then installs everything in the background (about 10–20 minutes)
+   and shows a notification when it's ready. Then **restart Premiere Pro**.
 
 It's signed and **notarized by Apple**, so it opens with no "unidentified developer" warning. It sets up the
 engine + AI, the panel, and the effect, and keeps the engine running automatically.
@@ -70,7 +71,7 @@ latest and reinstalls. **Removing:** double-click **`uninstall.command`**.
 > verified on a Windows machine — please report anything odd.
 
 **Easiest — one file, double-click (like the Mac installer):**
-1. Download **[colourMatik-Setup-Windows.cmd](https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup-Windows.cmd)** from the latest release.
+1. Download **[colourMatik-Setup.exe](https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe)** from the latest release.
 2. Double-click it. (If SmartScreen warns: *More info ▸ Run anyway* — the effect itself is
    CI-built from this repo.) It downloads the latest colourMatik and installs everything:
    Python 3.11 / git / ffmpeg (winget), engine + AI, the Premiere panel, the native effect,

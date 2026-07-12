@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.1 — timeline-segment sampling, 7-frame pooling, residual fine-tune pass, 32-bit float + 65-cube effect, Windows support."
+  "notes": "colourMatik 1.2 — one-double-click installers for both platforms (notarized macOS app + Windows Setup.exe), live progress bar on Match & Apply, faster engine, new chameleon-on-film app icon."
 }
