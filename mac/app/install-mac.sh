@@ -56,9 +56,11 @@ fi
 
 # 3) Python 3.11 + ffmpeg via Homebrew, then the full engine setup + AI (as user)
 if [ -n "$BREW" ]; then
-  echo "Installing Python 3.11 + ffmpeg…"
+  echo "Installing Python 3.11 + ffmpeg + git…"
   notify "Installing Python + ffmpeg…"
-  asuser /bin/bash -c "\"$BREW\" install python@3.11 ffmpeg >/dev/null 2>&1 || \"$BREW\" install python@3.11 ffmpeg"
+  # git is needed by setup.sh (clones CanonCGT); install it so a machine without
+  # Xcode CLT doesn't hit a blocking install prompt mid-way.
+  asuser /bin/bash -c "\"$BREW\" install python@3.11 ffmpeg git >/dev/null 2>&1 || \"$BREW\" install python@3.11 ffmpeg git"
   BREW_PREFIX="$("$BREW" --prefix)"
   echo "Running engine setup (venv, deps, AI models)…"
   notify "Setting up the engine + AI (this is the long part)…"
