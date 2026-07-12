@@ -8,6 +8,7 @@ colour-science>=0.4.4
 POT>=0.9
 pillow>=10
 imageio>=2.30
+imageio-ffmpeg>=0.4.9   # bundles a static ffmpeg -> no system ffmpeg needed
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9

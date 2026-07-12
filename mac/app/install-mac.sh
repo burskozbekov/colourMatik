@@ -58,38 +58,39 @@ prog 10 13 "Preparing files…"
 /usr/sbin/chown -R "$CONSOLE_USER" "$DEST"
 /usr/bin/xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 
-# 2) Homebrew (only if missing). Pre-create the prefix owned by the user so the
-#    unattended installer needs no password.
-BREW=""
-[ -x /opt/homebrew/bin/brew ] && BREW=/opt/homebrew/bin/brew
-[ -x /usr/local/bin/brew ]   && BREW=/usr/local/bin/brew
-if [ -z "$BREW" ]; then
-  prog 13 24 "Installing Homebrew…"
-  echo "Installing Homebrew (unattended)…"
-  /bin/mkdir -p /opt/homebrew
-  /usr/sbin/chown -R "$CONSOLE_USER":admin /opt/homebrew
-  asuser /bin/bash -c 'NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' || echo "WARN: Homebrew install returned non-zero"
-  [ -x /opt/homebrew/bin/brew ] && BREW=/opt/homebrew/bin/brew
+# 2) Python 3.11+ — the ONLY prerequisite. If missing, install the official
+#    python.org package: we are root, so `installer` runs silently and
+#    deterministically. No Homebrew, no git, no Xcode tools, no system ffmpeg
+#    (ffmpeg is bundled via the imageio-ffmpeg pip package; CanonCGT comes as a zip).
+have_py() {
+  for c in python3.11 \
+           /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 \
+           /usr/local/bin/python3.11 /opt/homebrew/bin/python3.11 python3; do
+    if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+if ! have_py; then
+  prog 13 30 "Installing Python (official package)…"
+  echo "Installing Python 3.11 from python.org…"
+  PYPKG="/tmp/colourMatik-python311.pkg"
+  /usr/bin/curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" -o "$PYPKG" || fail "Python download failed"
+  /usr/sbin/installer -pkg "$PYPKG" -target / || fail "Python install failed"
+  /bin/rm -f "$PYPKG"
 fi
+have_py || fail "Python 3.11 not available after install"
 
-# 3) Python 3.11 + ffmpeg + git via Homebrew, then the full engine setup + AI (as user)
-if [ -n "$BREW" ]; then
-  prog 24 32 "Installing Python + ffmpeg…"
-  echo "Installing Python 3.11 + ffmpeg + git…"
-  # git is needed by setup.sh (clones CanonCGT); install it so a machine without
-  # Xcode CLT doesn't hit a blocking install prompt mid-way.
-  asuser /bin/bash -c "\"$BREW\" install python@3.11 ffmpeg git >/dev/null 2>&1 || \"$BREW\" install python@3.11 ffmpeg git"
-  BREW_PREFIX="$("$BREW" --prefix)"
-  prog 32 42 "Setting up the engine…"
-  echo "Running engine setup (venv, deps, AI models)…"
-  # setup.sh refines progress itself (32 → 84) via COLOURMATIK_PROGRESS
-  asuser /bin/bash -c "cd '$DEST' && COLOURMATIK_PROGRESS='$PROGRESS' PATH=\"$BREW_PREFIX/bin:\$PATH\" ./setup.sh" || fail "engine setup failed"
-  prog 86 90 "Installing the Premiere panel…"
-  echo "Installing the Premiere panel…"
-  asuser /bin/bash -c "cd '$DEST' && PATH=\"$BREW_PREFIX/bin:\$PATH\" ./install-panel.sh" || echo "WARN: panel install returned non-zero"
-else
-  fail "Homebrew unavailable"
-fi
+# 3) Full engine setup + AI (as the user). setup.sh finds Python itself and
+#    refines progress (32 -> 84) via COLOURMATIK_PROGRESS.
+PYPATHS="/Library/Frameworks/Python.framework/Versions/3.11/bin:/usr/local/bin:/opt/homebrew/bin"
+prog 32 42 "Setting up the engine…"
+echo "Running engine setup (venv, deps, AI models)…"
+asuser /bin/bash -c "cd '$DEST' && COLOURMATIK_PROGRESS='$PROGRESS' PATH=\"$PYPATHS:\$PATH\" ./setup.sh" || fail "engine setup failed"
+prog 86 90 "Installing the Premiere panel…"
+echo "Installing the Premiere panel…"
+asuser /bin/bash -c "cd '$DEST' && PATH=\"$PYPATHS:\$PATH\" ./install-panel.sh" || echo "WARN: panel install returned non-zero"
 
 # 4) native effect -> shared MediaCore (we are root here, no sudo needed)
 prog 90 94 "Installing the colourMatik effect…"
@@ -104,8 +105,7 @@ fi
 
 # 5) start the engine at login (LaunchAgent) + now
 prog 94 99 "Starting the engine…"
-if [ -n "${BREW:-}" ] && [ -d "$DEST/.venv" ]; then
-  BREW_PREFIX="$("$BREW" --prefix)"
+if [ -d "$DEST/.venv" ]; then
   PLIST="$USER_HOME/Library/LaunchAgents/com.colourmatik.engine.plist"
   asuser /bin/mkdir -p "$USER_HOME/Library/LaunchAgents" "$USER_HOME/Library/Logs"
   /bin/cat > "$PLIST" <<PL
@@ -117,7 +117,7 @@ if [ -n "${BREW:-}" ] && [ -d "$DEST/.venv" ]; then
     <string>$DEST/.venv/bin/python</string><string>-u</string><string>-m</string><string>colourmatik.webapp</string>
   </array>
   <key>WorkingDirectory</key><string>$DEST</string>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$BREW_PREFIX/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PYPATHS:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string><key>ThrottleInterval</key><integer>5</integer>

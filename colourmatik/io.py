@@ -1,10 +1,30 @@
-"""Image + video frame I/O. Video frames come out via ffmpeg (already on the system)."""
+"""Image + video frame I/O. Video frames come out via ffmpeg — the system one if
+installed, else the static binary bundled by the imageio-ffmpeg pip package, so a
+fresh machine needs NO ffmpeg install."""
 from __future__ import annotations
+import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 import numpy as np
 import imageio.v3 as iio
+
+_FFMPEG: str | None = None
+
+
+def _ffmpeg_exe() -> str:
+    global _FFMPEG
+    if _FFMPEG is None:
+        p = shutil.which("ffmpeg")
+        if not p:
+            try:
+                from imageio_ffmpeg import get_ffmpeg_exe
+                p = get_ffmpeg_exe()
+            except Exception:
+                p = "ffmpeg"
+        _FFMPEG = p
+    return _FFMPEG
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 VIDEO_EXTS = {".mov", ".mp4", ".mxf", ".m4v", ".avi", ".mkv", ".mts", ".braw"}
@@ -44,15 +64,27 @@ def save_image(path: str | Path, enc: np.ndarray) -> None:
 
 
 def _probe_duration(video: str | Path) -> float | None:
+    if shutil.which("ffprobe"):
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nk=1:nw=1", str(video)],   # nw = noprint_wrappers (np is invalid)
+                capture_output=True, text=True, check=True,
+            )
+            return float(out.stdout.strip())
+        except Exception:
+            pass
+    # no ffprobe (bundled-ffmpeg machines): parse "Duration: HH:MM:SS.cc" from ffmpeg -i
     try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nk=1:nw=1", str(video)],   # nw = noprint_wrappers (np is invalid)
-            capture_output=True, text=True, check=True,
-        )
-        return float(out.stdout.strip())
+        out = subprocess.run([_ffmpeg_exe(), "-hide_banner", "-i", str(video)],
+                             capture_output=True, text=True)
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out.stderr)
+        if m:
+            h, mnt, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return h * 3600 + mnt * 60 + s
     except Exception:
-        return None
+        pass
+    return None
 
 
 def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
@@ -71,7 +103,7 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
         out = Path(tmp) / "frame.png"
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
+                [_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
                  "-i", str(video), "-frames:v", "1", str(out)],
                 check=True,
             )
