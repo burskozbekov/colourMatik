@@ -11,7 +11,8 @@ PY="${PYTHON:-python3.11}"
 
 # Optional progress reporting: when COLOURMATIK_PROGRESS is set to a file path,
 # write "PCT|CAP|message" stage markers there (read by the installer progress bar).
-prog() { if [ -n "${COLOURMATIK_PROGRESS:-}" ]; then echo "$1|$2|$3" > "$COLOURMATIK_PROGRESS"; fi; }
+# A failed write must NEVER kill the setup (set -e) — progress is cosmetic.
+prog() { { [ -n "${COLOURMATIK_PROGRESS:-}" ] && echo "$1|$2|$3" > "$COLOURMATIK_PROGRESS"; } 2>/dev/null || true; }
 
 prog 32 37 "Creating the engine environment…"
 echo "==> Creating virtualenv (.venv) with $PY"

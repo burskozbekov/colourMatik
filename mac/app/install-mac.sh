@@ -13,7 +13,9 @@ PROGRESS="/tmp/colourMatik-progress"
 exec > >(tee -a "$LOG") 2>&1
 echo "== colourMatik install $(date) =="
 
-prog() { echo "$1|$2|$3" > "$PROGRESS"; chmod 644 "$PROGRESS" 2>/dev/null || true; }
+# 666: we write as root but setup.sh refines progress as the logged-in user —
+# the user must be able to write this file too, or their redirect fails.
+prog() { echo "$1|$2|$3" > "$PROGRESS"; chmod 666 "$PROGRESS" 2>/dev/null || true; }
 
 # If this script dies ANYWHERE unexpectedly, surface it on the progress bar —
 # the app must never sit on a frozen bar with nothing actually running.
