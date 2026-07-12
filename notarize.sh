@@ -44,11 +44,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>1.0.0</string>
   <key>CFBundleShortVersionString</key><string>1.0.0</string>
   <key>CFBundleExecutable</key><string>installer</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+# App icon (chameleon on film) — shows in Finder / Dock / the download.
+cp "$DIR/assets/icons/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/MacOS/installer" <<'RUN'
 #!/bin/bash
 HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
