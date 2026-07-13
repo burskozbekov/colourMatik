@@ -8,7 +8,15 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.1.0";
+const LOCAL_VERSION = "1.2.0";
+
+/* fetch with a hard timeout — a wedged engine must never freeze the panel */
+async function fetchT(url, opts, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...(opts || {}), signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+}
 // Update checks read version.json straight from the GitHub repo (always hosted,
 // CORS-friendly). Bump version.json + this constant together on each release.
 const UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
@@ -38,20 +46,27 @@ function refreshRun() {
 }
 
 /* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
-let _progPoll = null, _progTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+let _progPoll = null, _progTick = null, _progReset = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 function _paintProg() {
   $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
 function startProgress(jobId) {
+  // defensively clear anything a previous run left behind (intervals must never orphan)
+  if (_progPoll) clearInterval(_progPoll);
+  if (_progTick) clearInterval(_progTick);
+  if (_progReset) { clearTimeout(_progReset); _progReset = null; }
   _dispPct = 0; _srvPct = 0; _srvMsg = "Starting";
   $("run").classList.add("loading");
+  let polling = false;                       // don't stack requests on a slow engine
   _progPoll = setInterval(async () => {
+    if (polling) return;
+    polling = true;
     try {
-      const r = await fetch(SERVER + "/progress/" + jobId, { cache: "no-cache" });
+      const r = await fetchT(SERVER + "/progress/" + jobId, { cache: "no-cache" }, 4000);
       const j = await r.json();
       if (typeof j.pct === "number") { _srvPct = j.pct; if (j.msg) _srvMsg = j.msg; }
-    } catch (e) {}
+    } catch (e) {} finally { polling = false; }
   }, 500);
   // Smoothly ease toward the server value, and gently creep forward within a
   // stage so the bar never looks frozen during the long AI steps.
@@ -68,7 +83,9 @@ function stopProgress(done) {
   if (_progTick) clearInterval(_progTick);
   _progPoll = _progTick = null;
   if (done) { _dispPct = 1; _srvMsg = "Done"; _paintProg(); }
-  setTimeout(() => {
+  if (_progReset) clearTimeout(_progReset);
+  _progReset = setTimeout(() => {
+    _progReset = null;
     $("run").classList.remove("loading");
     $("run-fill").style.width = "0%";
     $("run-label").textContent = "MATCH & APPLY";
@@ -89,6 +106,16 @@ async function getSelected() {
     const tsel = await seq.getSelection();
     const clips = tsel ? await tsel.getTrackItems() : [];
     for (const c of clips) {
+      // Skip AUDIO track items of linked clips when the API can tell us — applying
+      // a video effect to an audio component chain fails cryptically. When the
+      // media-type API is unavailable, fall back to the old duck-typing unchanged.
+      try {
+        if (typeof c.getMediaType === "function" && ppro.Constants && ppro.Constants.MediaType
+            && ppro.Constants.MediaType.AUDIO !== undefined) {
+          const mt = await c.getMediaType();
+          if (String(mt) === String(ppro.Constants.MediaType.AUDIO)) continue;
+        }
+      } catch (e) {}
       if (typeof c.getComponentChain === "function") {      // video clip on the timeline
         const pi = await c.getProjectItem();
         const clip = ppro.ClipProjectItem.cast(pi);
@@ -202,9 +229,13 @@ async function applyEffect(trackItem, slot, intensityPct) {
 }
 
 /* ---- Match & Apply -------------------------------------------------------- */
+let _runGen = 0;   // generation token: a newer run() invalidates an older one's cleanup
 async function run() {
+  const gen = ++_runGen;
   $("run").disabled = true;
   $("preview").className = "hidden";
+  state.slot = null;                 // mid-match intensity drags must no-op, not apply the old LUT
+  $("intensity-section").className = "section hidden";
   setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
   const jobId = newJobId();
   startProgress(jobId);
@@ -212,7 +243,9 @@ async function run() {
   try {
     let res;
     try {
-      res = await fetch(SERVER + "/match_paths", {
+      // generous timeout: AI matches can take a while, but a wedged engine must
+      // never leave the button dead forever
+      res = await fetchT(SERVER + "/match_paths", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_path: state.srcPath, reference_path: state.refPath,
@@ -221,12 +254,13 @@ async function run() {
           reference_in: state.refIn ?? null, reference_out: state.refOut ?? null,
           job_id: jobId,
         }),
-      });
+      }, 300000);
     } catch (netErr) {
       throw new Error("Can't reach the engine at " + SERVER + " — start it with ./colourmatik-app");
     }
     const j = await res.json().catch(() => ({ ok: false, error: "HTTP " + res.status }));
     if (!j.ok) throw new Error(j.error || ("HTTP " + res.status));
+    if (gen !== _runGen) return;     // a newer run took over — leave its UI alone
     ok = true;
     // The match (the slow part the bar tracks) is done — finish the bar NOW and
     // stop its polling timers before the quick apply steps, so nothing keeps
@@ -238,17 +272,21 @@ async function run() {
     state.rid = j.rid;
     $("preview-img").src = j.preview;
     $("preview").className = "";
-    $("intensity-section").className = "section";
-    $("intensity").value = DEFAULT_INTENSITY;
-    $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
 
     // bake the accurate LUT into a fresh slot for the native colourMatik effect
     let ej = { ok: false };
     try {
-      const eres = await fetch(SERVER + "/effect_lut", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rid: j.rid }) });
+      const eres = await fetchT(SERVER + "/effect_lut", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rid: j.rid }) }, 30000);
       ej = await eres.json().catch(() => ({ ok: false }));
     } catch (e) {}
+    if (gen !== _runGen) return;
     state.slot = ej.ok ? ej.slot : null;
+    // reveal Intensity only now that the slot is known, so the slider is never live-but-dead
+    if (state.slot != null && state.srcTrackItem) {
+      $("intensity-section").className = "section";
+      $("intensity").value = DEFAULT_INTENSITY;
+      $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
+    }
 
     const label = j.method_label || j.method;
     const mTxt = j.ai_used ? `${label} 🧠` : label;   // brain = local AI chose the match
@@ -275,10 +313,13 @@ async function run() {
       }
     }
   } catch (e) {
-    setStatus("ERROR", String(e.message || e), "error");
+    if (gen === _runGen) setStatus("ERROR", String(e.message || e), "error");
   } finally {
-    if (!ok) stopProgress(false);   // error before the match resolved -> clear the bar
-    refreshRun();
+    // only the newest run may touch the shared bar/button state
+    if (gen === _runGen) {
+      if (!ok) stopProgress(false);   // error before the match resolved -> clear the bar
+      refreshRun();
+    }
   }
 }
 
@@ -313,7 +354,7 @@ async function checkForUpdates() {
   if (updateUrl) return openUrl(updateUrl);   // already found — clicking opens the download
   $("update-link").textContent = "Checking…";
   try {
-    const r = await fetch(UPDATE_URL, { cache: "no-cache" });
+    const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
     if (j.version && semverGt(j.version, LOCAL_VERSION)) {

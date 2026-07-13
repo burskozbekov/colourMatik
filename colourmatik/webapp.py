@@ -33,6 +33,20 @@ app = FastAPI(title="colourMatik")
 # UXP panels (and any local caller) fetch this server cross-origin.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
+
+
+@app.middleware("http")
+async def _block_foreign_websites(request, call_next):
+    """The engine reads local files by path, so a malicious WEB PAGE must not be
+    able to drive it (a browser tab can reach 127.0.0.1). Browsers always send an
+    Origin header on cross-origin requests; the UXP panel and local tools send
+    none (or a non-http scheme). Block only http(s) origins that aren't local."""
+    origin = request.headers.get("origin", "")
+    if origin.startswith(("http://", "https://")):
+        host = origin.split("//", 1)[1].split("/", 1)[0].split(":", 1)[0].lower()
+        if host not in ("127.0.0.1", "localhost", "[::1]"):
+            return JSONResponse({"ok": False, "error": "forbidden origin"}, status_code=403)
+    return await call_next(request)
 WORK = Path(tempfile.gettempdir()) / "colourmatik_web"
 WORK.mkdir(exist_ok=True)
 _RESULTS: dict[str, Path] = {}
@@ -191,9 +205,17 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
     _install_lut(res.lut, tf)  # expose in Premiere LUT dropdowns (visible after next launch)
 
     # Preview uses ONE frame — reuse the first frame already decoded above (each
-    # pooled clip is n frames stacked vertically) instead of decoding again.
-    src1 = src[: src.shape[0] // f] if f > 1 else src
-    ref1 = ref[: ref.shape[0] // f] if f > 1 else ref
+    # pooled VIDEO clip is n frames stacked vertically) instead of decoding again.
+    # Images are never stacked, so they must not be sliced (a PNG target would
+    # otherwise preview as its top 1/f strip).
+    def _first_frame(arr, path):
+        if f > 1 and Path(path).suffix.lower() in cmio.VIDEO_EXTS:
+            h = arr.shape[0] // f
+            if h > 0:
+                return arr[:h]
+        return arr
+    src1 = _first_frame(src, src_path)
+    ref1 = _first_frame(ref, ref_path)
     _set_progress(job_id, 0.92, "Rendering the preview")
     matched1 = apply_lut(src1, res.lut)
     preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
@@ -231,9 +253,10 @@ def do_match(source: UploadFile = File(...), reference: UploadFile = File(...),
         src_path = _save_upload(source, job)
         ref_path = _save_upload(reference, job)
         return JSONResponse(_process(src_path, ref_path, mode, tf, frames, job,
-                                     f"colourMatik {Path(source.filename).stem}"))
+                                     f"colourMatik {Path(source.filename or 'clip').stem}"))
     except Exception as e:
         traceback.print_exc()
+        shutil.rmtree(job, ignore_errors=True)   # don't leak the work dir on failure
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
 
 
@@ -273,6 +296,7 @@ def match_paths(req: PathReq):
         traceback.print_exc()
         if req.job_id:
             _set_progress(req.job_id, 1.0, "error")
+        shutil.rmtree(job, ignore_errors=True)   # don't leak the work dir on failure
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
 
 
@@ -294,6 +318,7 @@ def bake(req: BakeReq):
     j = _JOBS.get(req.rid)
     if j is None:
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
+    job = None
     try:
         baked = apply_intensity(j["lut"], float(req.intensity))
         job = WORK / uuid.uuid4().hex
@@ -310,6 +335,8 @@ def bake(req: BakeReq):
                              "cube_path": str(cube), "preview": preview, "de_after": da})
     except Exception as e:
         traceback.print_exc()
+        if job is not None:
+            shutil.rmtree(job, ignore_errors=True)   # don't leak the work dir on failure
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
 
 

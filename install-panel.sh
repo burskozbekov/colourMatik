@@ -31,7 +31,7 @@ d["plugins"].append({
     "hostMinVersion": "26.0", "name": "colourMatik",
     "path": "$localPlugins/External/com.colourmatik.panel_1.0.0",
     "pluginId": "com.colourmatik.panel", "status": "enabled",
-    "type": "uxp", "versionString": "1.0.0",
+    "type": "uxp", "versionString": "1.2.0",
 })
 json.dump(d, open(reg, "w"))
 print("registered:", [p["pluginId"] for p in d["plugins"]])

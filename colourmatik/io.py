@@ -152,7 +152,11 @@ def extract_frames(video: str | Path, n: int = 3,
         mid = ((lo + hi) / 2.0) if hi is not None else None
         return extract_frame(video, mid)
     if not dur:
-        return extract_frame(video)
+        # duration unknown -> can't spread samples; replicate the one frame so the
+        # contract "n>1 returns n stacked frames" holds for every caller that
+        # slices the stack back apart (e.g. the preview reuses stack[:H/n]).
+        f0 = extract_frame(video)
+        return np.concatenate([f0] * n, axis=0)
     # sample at interior points of the range, avoiding the very first/last frame
     span = hi - lo
     times = [lo + span * (i + 1) / (n + 1) for i in range(n)]

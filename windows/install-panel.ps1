@@ -26,7 +26,7 @@ $j.plugins += [pscustomobject]@{
     hostMinVersion = "26.0"; name = "colourMatik"
     path = '$localPlugins/External/com.colourmatik.panel_1.0.0'
     pluginId = "com.colourmatik.panel"; status = "enabled"
-    type = "uxp"; versionString = "1.0.0"
+    type = "uxp"; versionString = "1.2.0"
 }
 ($j | ConvertTo-Json -Depth 8 -Compress) | Set-Content -Encoding UTF8 $Reg
 Write-Host "Panel installed. Restart Premiere Pro -> Window > UXP Plugins > colourMatik."

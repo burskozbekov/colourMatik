@@ -59,6 +59,9 @@ static int cm_load_lut(A_long slot, ColourMatikSeq *seq) {
 			strncmp(line, "LUT_1D", 6) == 0) continue;
 		float r, g, b;
 		if (sscanf(line, "%f %f %f", &r, &g, &b) == 3) {
+			// a corrupt file can carry nan/inf ("nan" parses as a float!) — one bad
+			// node would smear NaN across every interpolated pixel. Reject the file.
+			if (!isfinite(r) || !isfinite(g) || !isfinite(b)) { fclose(f); return 0; }
 			if (count < CM_LUT_N3MAX) {
 				seq->lut[count * 3 + 0] = r;
 				seq->lut[count * 3 + 1] = g;
@@ -331,18 +334,18 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	ColourMatikSeq *seq = NULL;
 	if (seqH && *(void **)seqH && (seq = *(ColourMatikSeq **)seqH) != NULL && seq->lut) {
 		// seq->lut is a real buffer allocated THIS session (SequenceSetup/Resetup).
-		// Lock-free load: on a slot change, drop 'loaded' first so readers fall
-		// back to identity instead of sampling a slot mid-swap; then (re)load.
-		// Concurrent loaders write identical bytes for the same slot.
-		if (seq->slot != slot) {
-			CM_STORE_RELEASE(&seq->loaded, 0);
-			seq->slot = slot;
-		}
-		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0) {
+		// Lock-free load, SLOT-TAGGED: 'loaded' holds slot+1 when lut is valid for
+		// that slot (0 = nothing). Tagging closes the race where a thread finishing
+		// a load of the OLD slot re-marked it valid after a slot change — its stale
+		// tag simply won't match, so the next render reloads. Concurrent loaders of
+		// the same slot write identical bytes; readers are gated on the tag.
+		const A_long want = slot + 1;
+		if (CM_LOAD_ACQUIRE(&seq->loaded) != want) {
 			int ok = cm_load_lut(slot, seq);       // fills seq->lut and seq->size
-			CM_STORE_RELEASE(&seq->loaded, ok ? 1 : 0);
+			seq->slot = slot;                      // informational (trace)
+			CM_STORE_RELEASE(&seq->loaded, ok ? want : 0);
 		}
-		if (CM_LOAD_ACQUIRE(&seq->loaded) == 0 || seq->size < 2 || intensity == 0.f)
+		if (CM_LOAD_ACQUIRE(&seq->loaded) != want || seq->size < 2 || intensity == 0.f)
 			identity = 1;
 	} else {
 		identity = 1;   // no sequence data / no LUT buffer -> passthrough

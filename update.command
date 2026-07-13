@@ -6,10 +6,19 @@ DIR="$(cd "$(dirname "$0")" && pwd)"; cd "$DIR"
 B='\033[1;34m'; G='\033[1;32m'; N='\033[0m'
 echo "${B}==> Updating colourMatik...${N}"
 
-if [ -d .git ]; then
+if [ -d .git ] && command -v git >/dev/null 2>&1; then
   git pull --ff-only || { echo "Could not pull updates (local changes?). Run: git stash && retry."; }
 else
-  echo "This folder isn't a git checkout; re-run install.command instead."; exit 1
+  # Installed from the one-click installer (zip, no .git): refresh from the zip.
+  # .venv / vendor / slot files are untouched; setup.sh below refreshes deps.
+  echo "==> Downloading the latest colourMatik (zip)..."
+  TMP="$(mktemp -d /tmp/colourMatik-upd.XXXXXX)"
+  curl -fsSL "https://github.com/burskozbekov/colourMatik/archive/refs/heads/main.zip" -o "$TMP/main.zip" || { echo "Download failed - check your internet connection."; exit 1; }
+  ditto -x -k "$TMP/main.zip" "$TMP" || { echo "Unzip failed."; exit 1; }
+  INNER="$(ls -d "$TMP"/colourMatik-* 2>/dev/null | head -1)"
+  [ -z "$INNER" ] && { echo "Unexpected zip layout."; exit 1; }
+  ditto "$INNER" "$DIR"
+  rm -rf "$TMP"
 fi
 
 echo "${B}==> Refreshing engine + AI...${N}";  ./setup.sh
