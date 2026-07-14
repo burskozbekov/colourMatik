@@ -92,15 +92,27 @@ prog 86 90 "Installing the Premiere panel…"
 echo "Installing the Premiere panel…"
 asuser /bin/bash -c "cd '$DEST' && PATH=\"$PYPATHS:\$PATH\" ./install-panel.sh" || echo "WARN: panel install returned non-zero"
 
-# 4) native effect -> shared MediaCore (we are root here, no sudo needed)
+# 4) native effect -> Premiere (shared MediaCore) AND After Effects (its own
+#    Plug-Ins folder — AE does NOT load effects from MediaCore). We are root here.
 prog 90 94 "Installing the colourMatik effect…"
-MC="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore"
-if [ -d "$DEST/colourmatik-fx/colourMatik.plugin" ]; then
+FX="$DEST/colourmatik-fx/colourMatik.plugin"
+if [ -d "$FX" ]; then
+  MC="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore"
   /bin/mkdir -p "$MC"
   /bin/rm -rf "$MC/colourMatik.plugin"
-  /usr/bin/ditto "$DEST/colourmatik-fx/colourMatik.plugin" "$MC/colourMatik.plugin"
+  /usr/bin/ditto "$FX" "$MC/colourMatik.plugin"
   /usr/bin/xattr -dr com.apple.quarantine "$MC/colourMatik.plugin" 2>/dev/null || true
-  echo "Effect installed."
+  echo "Effect installed for Premiere (MediaCore)."
+  # every installed After Effects version -> its own Plug-Ins/colourMatik/
+  for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
+    AEPLUG="$AEAPP/Plug-Ins"
+    [ -d "$AEPLUG" ] || continue
+    /bin/mkdir -p "$AEPLUG/colourMatik"
+    /bin/rm -rf "$AEPLUG/colourMatik/colourMatik.plugin"
+    /usr/bin/ditto "$FX" "$AEPLUG/colourMatik/colourMatik.plugin"
+    /usr/bin/xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
+    echo "Effect installed for After Effects -> $AEPLUG/colourMatik"
+  done
 fi
 
 # 5) start the engine at login (LaunchAgent) + now

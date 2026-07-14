@@ -26,6 +26,25 @@ $SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 if ! codesign --verify "$DEST" >/dev/null 2>&1; then
     $SUDO codesign --force --sign - --timestamp=none "$DEST" >/dev/null 2>&1 || true
 fi
+echo "Installed (Premiere) → $DEST"
 
-echo "Installed → $DEST"
-echo "Restart Premiere Pro / After Effects, then find it under Video Effects ▸ colourMatik."
+# After Effects does NOT load effects from the shared MediaCore folder — only from
+# its OWN Plug-Ins folder. Install a copy there too, for every AE version present,
+# or the effect shows in Premiere but is invisible in After Effects.
+shopt -s nullglob
+for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
+    AEPLUG="$AEAPP/Plug-Ins"
+    [ -d "$AEPLUG" ] || continue
+    AEDEST="$AEPLUG/colourMatik/colourMatik.plugin"
+    if [ ! -w "$AEPLUG" ] && [ -z "$SUDO" ]; then
+        echo "After Effects plug-ins folder needs admin — you may be asked for your password."
+        SUDO="sudo"
+    fi
+    $SUDO mkdir -p "$AEPLUG/colourMatik"
+    $SUDO rm -rf "$AEDEST"
+    $SUDO cp -R "$SRC" "$AEDEST"
+    $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
+    echo "Installed (After Effects) → $AEDEST"
+done
+
+echo "Restart Premiere Pro / After Effects, then find it under Effects ▸ colourMatik ▸ colourMatik."
