@@ -5,13 +5,13 @@
 	<key>BuildMachineOSBuild</key>
 	<string>25F80</string>
 	<key>CFBundleExecutable</key>
-	<string>GammaTable</string>
+	<string>colourMatik</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.adobe.AfterEffects.GammaTable</string>
+	<string>com.catheadai.colourmatik.effect</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>GammaTable</string>
+	<string>colourMatik</string>
 	<key>CFBundlePackageType</key>
 	<string>eFKT</string>
 	<key>CFBundleSignature</key>
