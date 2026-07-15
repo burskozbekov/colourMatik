@@ -104,6 +104,7 @@ if [ -d "$FX" ]; then
   /usr/bin/xattr -dr com.apple.quarantine "$MC/colourMatik.plugin" 2>/dev/null || true
   echo "Effect installed for Premiere (MediaCore)."
   # every installed After Effects version -> its own Plug-Ins/colourMatik/
+  JSX="$DEST/colourmatik-ae/colourMatik.jsx"
   for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     AEPLUG="$AEAPP/Plug-Ins"
     [ -d "$AEPLUG" ] || continue
@@ -112,6 +113,13 @@ if [ -d "$FX" ]; then
     /usr/bin/ditto "$FX" "$AEPLUG/colourMatik/colourMatik.plugin"
     /usr/bin/xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
     echo "Effect installed for After Effects -> $AEPLUG/colourMatik"
+    # AE Match & Apply panel (ScriptUI)
+    AESUI="$AEAPP/Scripts/ScriptUI Panels"
+    if [ -f "$JSX" ] && [ -d "$AESUI" ]; then
+      /bin/cp "$JSX" "$AESUI/colourMatik.jsx"
+      /usr/bin/xattr -d com.apple.quarantine "$AESUI/colourMatik.jsx" 2>/dev/null || true
+      echo "Panel installed for After Effects -> $AESUI/colourMatik.jsx"
+    fi
   done
 fi
 

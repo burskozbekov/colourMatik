@@ -48,6 +48,13 @@ foreach ($aeRoot in $aeRoots) {
             Copy-Item $Src $aeDest -Force
             Unblock-File $aeDest -ErrorAction SilentlyContinue
             Write-Host "Effect installed (After Effects) -> $aeDest"
+            # AE Match & Apply panel (ScriptUI — AE has no UXP)
+            $jsx = Join-Path $Root "colourmatik-ae\colourMatik.jsx"
+            $aeSui = Join-Path $_.FullName "Support Files\Scripts\ScriptUI Panels"
+            if ((Test-Path $jsx) -and (Test-Path $aeSui)) {
+                Copy-Item $jsx (Join-Path $aeSui "colourMatik.jsx") -Force
+                Write-Host "Panel installed (After Effects) -> $aeSui\colourMatik.jsx"
+            }
         }
     }
 }

@@ -44,7 +44,14 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     $SUDO rm -rf "$AEDEST"
     $SUDO cp -R "$SRC" "$AEDEST"
     $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
-    echo "Installed (After Effects) → $AEDEST"
+    echo "Installed effect (After Effects) → $AEDEST"
+    # the AE Match & Apply panel (ScriptUI — AE has no UXP)
+    AESUI="$AEAPP/Scripts/ScriptUI Panels"
+    if [ -f "$DIR/colourmatik-ae/colourMatik.jsx" ] && [ -d "$AESUI" ]; then
+        $SUDO cp "$DIR/colourmatik-ae/colourMatik.jsx" "$AESUI/colourMatik.jsx"
+        $SUDO xattr -d com.apple.quarantine "$AESUI/colourMatik.jsx" 2>/dev/null || true
+        echo "Installed panel  (After Effects) → $AESUI/colourMatik.jsx"
+    fi
 done
 
 echo "Restart Premiere Pro / After Effects, then find it under Effects ▸ colourMatik ▸ colourMatik."
