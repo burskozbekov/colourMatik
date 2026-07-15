@@ -42,11 +42,40 @@ function cm_activeComp() {
     } catch (e2) {}
     return null;
 }
+/* first selected layer that can hold effects (footage, precomp, solid, text, shape) */
 function cm_selLayer(comp) {
     var s = comp.selectedLayers, i;
-    for (i = 0; i < s.length; i++) {
-        try { if (s[i].source && s[i].source.mainSource && (s[i].source.mainSource instanceof FileSource) && s[i].source.mainSource.file) return s[i]; } catch (e) {}
-    }
+    for (i = 0; i < s.length; i++) { try { if (s[i] instanceof AVLayer) return s[i]; } catch (e) {} }
+    for (i = 0; i < s.length; i++) { try { if (s[i].property("ADBE Effect Parade")) return s[i]; } catch (e2) {} }
+    return null;
+}
+
+/* Resolve a layer to a still image the engine can read. A footage layer with a
+ * file uses the file directly; anything else (PRECOMP, solid, text, shape) is
+ * rendered to a temp PNG at its current frame — so precomps just work. */
+function cm_layerImagePath(L) {
+    // 1) plain footage file
+    try {
+        if (L.source && L.source.mainSource && (L.source.mainSource instanceof FileSource) && L.source.mainSource.file)
+            return L.source.mainSource.file.fsName;
+    } catch (e) {}
+    // 2) precomp -> render the SOURCE comp's current frame
+    try {
+        if (L.source && (L.source instanceof CompItem)) {
+            var png1 = new File(Folder.temp.fsName + "/cmk_" + (new Date()).getTime() + "_" + L.index + ".png");
+            L.source.saveFrameToPng(L.source.time, png1);
+            if (png1.exists) return png1.fsName;
+        }
+    } catch (e2) {}
+    // 3) any other AV layer -> render the CONTAINING comp's current frame (best effort)
+    try {
+        var comp = cm_activeComp();
+        if (comp) {
+            var png2 = new File(Folder.temp.fsName + "/cmk_" + (new Date()).getTime() + "_c.png");
+            comp.saveFrameToPng(comp.time, png2);
+            if (png2.exists) return png2.fsName;
+        }
+    } catch (e3) {}
     return null;
 }
 function cm_layerByIndex(comp, idx) {
@@ -60,12 +89,14 @@ function cm_findEffect(L) {
     return null;
 }
 
-/* (A) read the currently-selected TARGET layer's source path + its layer index */
+/* (A) read the currently-selected layer's image path (file, or rendered PNG for a
+ *     precomp/solid/etc.) + its layer index */
 function cm_getSelectedSourcePath() {
     try {
         var comp = cm_activeComp(); if (!comp) return cm_res(false, "Open a composition first.");
-        var L = cm_selLayer(comp);  if (!L)   return cm_res(false, "Select a footage layer in the timeline.");
-        var path = L.source.mainSource.file.fsName;
+        var L = cm_selLayer(comp);  if (!L)   return cm_res(false, "Select a layer in the timeline.");
+        var path = cm_layerImagePath(L);
+        if (!path) return cm_res(false, "Couldn't read that layer — select a footage or precomp layer.");
         return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index);
     } catch (e) { return cm_res(false, "Error: " + e.toString()); }
 }
