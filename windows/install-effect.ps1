@@ -52,15 +52,33 @@ foreach ($aeRoot in $aeRoots) {
             Copy-Item $aeSrc $aeDest -Force
             Unblock-File $aeDest -ErrorAction SilentlyContinue
             Write-Host "Effect installed (After Effects) -> $aeDest"
-            # AE Match & Apply panel (ScriptUI — AE has no UXP)
-            $jsx = Join-Path $Root "colourmatik-ae\colourMatik.jsx"
-            $aeSui = Join-Path $_.FullName "Support Files\Scripts\ScriptUI Panels"
-            if ((Test-Path $jsx) -and (Test-Path $aeSui)) {
-                Copy-Item $jsx (Join-Path $aeSui "colourMatik.jsx") -Force
-                Write-Host "Panel installed (After Effects) -> $aeSui\colourMatik.jsx"
-            }
+            # remove the deprecated ScriptUI panel from older installs
+            $oldJsx = Join-Path $_.FullName "Support Files\Scripts\ScriptUI Panels\colourMatik.jsx"
+            if (Test-Path $oldJsx) { Remove-Item -Force $oldJsx -ErrorAction SilentlyContinue }
         }
     }
+}
+
+# AE Match & Apply panel (CEP — full HTML, identical to the Premiere panel).
+# Per-user (%APPDATA%), no admin: Window > Extensions > colourMatik.
+$cepSrc = Join-Path $Root "colourmatik-cep"
+if (Test-Path $cepSrc) {
+    # resolve the LOGGED-IN user's profile even when elevated
+    $userProfile = $env:USERPROFILE
+    try {
+        $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
+        if ($ex) { $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
+                   if ($owner.User) { $userProfile = "C:\Users\$($owner.User)" } }
+    } catch {}
+    $cepDest = Join-Path $userProfile "AppData\Roaming\Adobe\CEP\extensions\com.catheadai.colourmatik"
+    if (Test-Path $cepDest) { Remove-Item -Recurse -Force $cepDest }
+    New-Item -ItemType Directory -Force -Path $cepDest | Out-Null
+    Copy-Item "$cepSrc\*" $cepDest -Recurse -Force
+    # allow the (unsigned) extension to load (PlayerDebugMode is a STRING "1")
+    foreach ($v in 9..12) {
+        try { reg add "HKCU\Software\Adobe\CSXS.$v" /v PlayerDebugMode /t REG_SZ /d 1 /f | Out-Null } catch {}
+    }
+    Write-Host "AE panel (CEP) installed -> Window > Extensions > colourMatik"
 }
 
 # The AE panel's curl needs "Allow Scripts to Write Files and Access Network".

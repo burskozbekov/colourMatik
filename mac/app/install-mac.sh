@@ -104,7 +104,6 @@ if [ -d "$FX" ]; then
   /usr/bin/xattr -dr com.apple.quarantine "$MC/colourMatik.plugin" 2>/dev/null || true
   echo "Effect installed for Premiere (MediaCore)."
   # every installed After Effects version -> its own Plug-Ins/colourMatik/
-  JSX="$DEST/colourmatik-ae/colourMatik.jsx"
   # AE gets the distinct-match-name variant so AE doesn't see MediaCore + its own
   # copy as a "duplicated effect plugin" (display name stays "colourMatik").
   FXAE="$DEST/colourmatik-fx/colourMatik-ae.plugin"; [ -d "$FXAE" ] || FXAE="$FX"
@@ -116,20 +115,24 @@ if [ -d "$FX" ]; then
     /usr/bin/ditto "$FXAE" "$AEPLUG/colourMatik/colourMatik.plugin"
     /usr/bin/xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
     echo "Effect installed for After Effects -> $AEPLUG/colourMatik"
-    # AE Match & Apply panel (ScriptUI)
-    AESUI="$AEAPP/Scripts/ScriptUI Panels"
-    if [ -f "$JSX" ] && [ -d "$AESUI" ]; then
-      /bin/cp "$JSX" "$AESUI/colourMatik.jsx"
-      /usr/bin/xattr -d com.apple.quarantine "$AESUI/colourMatik.jsx" 2>/dev/null || true
-      echo "Panel installed for After Effects -> $AESUI/colourMatik.jsx"
-    fi
+    # remove the deprecated ScriptUI panel from older installs
+    /bin/rm -f "$AEAPP/Scripts/ScriptUI Panels/colourMatik.jsx" 2>/dev/null || true
   done
-  # Enable AE's "Allow Scripts to Write Files and Access Network" pref (the panel's
-  # curl needs it; a running script can't set it). Write it into each AE version's
-  # prefs as the user (identical to the checkbox). Runs as the logged-in user so
-  # ownership stays correct.
-  asuser /bin/bash -c 'for PF in "$HOME/Library/Preferences/Adobe/After Effects/"*/"Adobe After Effects "*" Prefs.txt"; do [ -f "$PF" ] || continue; /usr/bin/grep -q "\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"0\"" "$PF" 2>/dev/null && /usr/bin/sed -i "" "s/\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"0\"/\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"1\"/" "$PF"; done' 2>/dev/null || true
-  echo "After Effects scripting/network permission enabled."
+  # AE Match & Apply panel (CEP — full HTML, identical to the Premiere panel).
+  # Per-user (no admin needed): Window ▸ Extensions ▸ colourMatik.
+  if [ -d "$DEST/colourmatik-cep" ]; then
+    CEPDEST="$USER_HOME/Library/Application Support/Adobe/CEP/extensions/com.catheadai.colourmatik"
+    /bin/rm -rf "$CEPDEST"
+    asuser /bin/mkdir -p "$CEPDEST"
+    /usr/bin/ditto "$DEST/colourmatik-cep" "$CEPDEST"
+    /usr/sbin/chown -R "$CONSOLE_USER" "$CEPDEST"
+    /usr/bin/xattr -dr com.apple.quarantine "$CEPDEST" 2>/dev/null || true
+    /usr/bin/find "$CEPDEST" -name ".DS_Store" -delete 2>/dev/null || true
+    # allow the (unsigned) extension to load — write as the USER, then flush prefs
+    asuser /bin/bash -c 'for v in 9 10 11 12; do defaults write com.adobe.CSXS.$v PlayerDebugMode 1; done' 2>/dev/null || true
+    /usr/bin/killall cfprefsd 2>/dev/null || true
+    echo "AE panel (CEP) installed -> Window / Extensions / colourMatik"
+  fi
 fi
 
 # 5) start the engine at login (LaunchAgent) + now

@@ -49,14 +49,25 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     $SUDO cp -R "$AESRC" "$AEDEST"
     $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
     echo "Installed effect (After Effects) → $AEDEST"
-    # the AE Match & Apply panel (ScriptUI — AE has no UXP)
-    AESUI="$AEAPP/Scripts/ScriptUI Panels"
-    if [ -f "$DIR/colourmatik-ae/colourMatik.jsx" ] && [ -d "$AESUI" ]; then
-        $SUDO cp "$DIR/colourmatik-ae/colourMatik.jsx" "$AESUI/colourMatik.jsx"
-        $SUDO xattr -d com.apple.quarantine "$AESUI/colourMatik.jsx" 2>/dev/null || true
-        echo "Installed panel  (After Effects) → $AESUI/colourMatik.jsx"
-    fi
+    # remove the deprecated ScriptUI panel if a previous version installed it
+    $SUDO rm -f "$AEAPP/Scripts/ScriptUI Panels/colourMatik.jsx" 2>/dev/null || true
 done
+
+# AE Match & Apply panel (CEP — full HTML, identical to the Premiere panel).
+# Per-user, no admin: Window ▸ Extensions ▸ colourMatik.
+if [ -d "$DIR/colourmatik-cep" ]; then
+    CEPDEST="$HOME/Library/Application Support/Adobe/CEP/extensions/com.catheadai.colourmatik"
+    rm -rf "$CEPDEST"; mkdir -p "$CEPDEST"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --exclude='.DS_Store' "$DIR/colourmatik-cep/" "$CEPDEST/"
+    else
+        cp -R "$DIR/colourmatik-cep/." "$CEPDEST/"
+    fi
+    # allow the (unsigned) extension to load; harmless if already set
+    for v in 9 10 11 12; do defaults write com.adobe.CSXS.$v PlayerDebugMode 1 2>/dev/null || true; done
+    killall cfprefsd 2>/dev/null || true
+    echo "Installed AE panel (CEP) → Window ▸ Extensions ▸ colourMatik"
+fi
 
 # The AE panel talks to the local engine via curl, which needs AE's "Allow Scripts
 # to Write Files and Access Network" preference. A running script can't flip it

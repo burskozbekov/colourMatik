@@ -34,6 +34,9 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
   done
 done
 
+say "Removing the After Effects CEP panel..."
+rm -rf "$HOME/Library/Application Support/Adobe/CEP/extensions/com.catheadai.colourmatik"
+
 say "Removing the colourMatik support folder..."
 rm -rf "$HOME/Library/Application Support/colourMatik"
 
