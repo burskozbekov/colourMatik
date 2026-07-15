@@ -61,7 +61,7 @@ resource 'PiPL' (16000) {
 		},
 		/* [13] */
 		AE_Effect_Global_OutFlags_2 {
-			0
+			134217728    /* PF_OutFlag2_SUPPORTS_THREADED_RENDERING (1<<27) */
 		},
 		/* [14] */
 		AE_Effect_Support_URL {

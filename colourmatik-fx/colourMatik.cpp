@@ -254,6 +254,13 @@ static PF_Err About(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *param
 static PF_Err GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
 	out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
 	out_data->out_flags |= PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
+	// Multi-Frame Rendering: AE renders many frames on parallel threads. Our LUT is
+	// read-only after a lock-free load, and SequenceResetup always reallocs + the
+	// LUT reloads from its .cube on the next render — so a flattened/garbage
+	// sequence-data pointer is safe across threads/processes. Declaring this stops
+	// AE's "not optimized for Multi-Frame Rendering" warning. We do NOT set
+	// SEQUENCE_DATA_NEEDS_FLATTENING, so GET_FLATTENED_SEQUENCE_DATA isn't required.
+	out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
 	// Premiere: declare high-precision pixel formats (float preferred, 8-bit fallback).
 	if (in_data->appl_id == kAppID_Premiere && in_data->pica_basicP) {
