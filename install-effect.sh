@@ -6,6 +6,10 @@
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$DIR/colourmatik-fx/colourMatik.plugin"
+# After Effects gets a variant with a DIFFERENT effect match name, so AE — which
+# scans both MediaCore and its own folder — doesn't flag the two as a "duplicated
+# effect plugin". The display name stays "colourMatik" in both hosts.
+AESRC="$DIR/colourmatik-fx/colourMatik-ae.plugin"; [ -d "$AESRC" ] || AESRC="$SRC"
 DEST="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/colourMatik.plugin"
 DESTDIR="$(dirname "$DEST")"
 
@@ -42,7 +46,7 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     fi
     $SUDO mkdir -p "$AEPLUG/colourMatik"
     $SUDO rm -rf "$AEDEST"
-    $SUDO cp -R "$SRC" "$AEDEST"
+    $SUDO cp -R "$AESRC" "$AEDEST"
     $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
     echo "Installed effect (After Effects) → $AEDEST"
     # the AE Match & Apply panel (ScriptUI — AE has no UXP)

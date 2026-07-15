@@ -105,12 +105,15 @@ if [ -d "$FX" ]; then
   echo "Effect installed for Premiere (MediaCore)."
   # every installed After Effects version -> its own Plug-Ins/colourMatik/
   JSX="$DEST/colourmatik-ae/colourMatik.jsx"
+  # AE gets the distinct-match-name variant so AE doesn't see MediaCore + its own
+  # copy as a "duplicated effect plugin" (display name stays "colourMatik").
+  FXAE="$DEST/colourmatik-fx/colourMatik-ae.plugin"; [ -d "$FXAE" ] || FXAE="$FX"
   for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     AEPLUG="$AEAPP/Plug-Ins"
     [ -d "$AEPLUG" ] || continue
     /bin/mkdir -p "$AEPLUG/colourMatik"
     /bin/rm -rf "$AEPLUG/colourMatik/colourMatik.plugin"
-    /usr/bin/ditto "$FX" "$AEPLUG/colourMatik/colourMatik.plugin"
+    /usr/bin/ditto "$FXAE" "$AEPLUG/colourMatik/colourMatik.plugin"
     /usr/bin/xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
     echo "Effect installed for After Effects -> $AEPLUG/colourMatik"
     # AE Match & Apply panel (ScriptUI)

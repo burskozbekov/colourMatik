@@ -45,7 +45,11 @@ foreach ($aeRoot in $aeRoots) {
             $aeDestDir = Join-Path $aePlug "colourMatik"
             New-Item -ItemType Directory -Force -Path $aeDestDir | Out-Null
             $aeDest = Join-Path $aeDestDir "colourMatik.aex"
-            Copy-Item $Src $aeDest -Force
+            # AE gets the distinct-match-name variant (avoids AE's "duplicated
+            # effect plugin" warning); falls back to the main build if absent.
+            $aeSrc = @("$Root\colourmatik-fx\colourMatik-ae.aex", "$Root\windows\colourMatik-ae.aex") | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $aeSrc) { $aeSrc = $Src }
+            Copy-Item $aeSrc $aeDest -Force
             Unblock-File $aeDest -ErrorAction SilentlyContinue
             Write-Host "Effect installed (After Effects) -> $aeDest"
             # AE Match & Apply panel (ScriptUI — AE has no UXP)

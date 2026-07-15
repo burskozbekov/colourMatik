@@ -1,265 +1,228 @@
 // colourMatik — After Effects panel (ScriptUI).
-// Same workflow as the Premiere panel: pick a REFERENCE clip, select the TARGET
-// layer, hit Match & Apply. It calls the local engine (http://127.0.0.1:8765) via
-// curl, then adds the native "colourMatik" effect to the layer and points it at
-// the freshly baked LUT slot. Intensity dials the strength live (0-200%).
+// Same workflow AND look as the Premiere panel: pick a REFERENCE clip, select the
+// TARGET layer, MATCH & APPLY. Calls the local engine (127.0.0.1:8765) via curl,
+// adds the native "colourMatik" effect and points it at the freshly baked LUT slot.
+// Intensity dials strength live (0-200%).
 //
-// After Effects has no UXP, so this is ExtendScript/ScriptUI. Networking is done
-// with the system `curl` (present on macOS and Windows 10 17063+), driven through
-// system.callSystem — no ExtendScript Socket.
-//
-// Requires: Preferences > Scripting & Expressions >
-//           "Allow Scripts to Write Files and Access Network" = ON.
+// AE has no UXP, so this is ExtendScript/ScriptUI with custom-drawn controls to
+// mirror the Premiere panel's colours + layout as closely as ScriptUI allows.
+// Networking uses the system `curl` via system.callSystem (macOS + Win10 17063+).
 // by Sevki Bugra Ozbek - catheadai.com
 
 (function (thisObj) {
     var SERVER = "http://127.0.0.1:8765";
-    var EFFECT_MATCH = "catheadai colourMatik";   // effect match name
-    var EFFECT_NAME = "colourMatik";              // effect display name (fallback)
-    var state = { refPath: null };
+    var EFFECT_MATCH = "catheadai colourMatik";
+    var EFFECT_NAME = "colourMatik";
+    var W = 300;                 // content width
+    var state = { refPath: null, mode: "different", look: "exact" };
 
-    // ---- self-enable AE's scripting network/file permission --------------------
-    // The panel needs "Allow Scripts to Write Files and Access Network". Instead of
-    // asking the user to find a checkbox, flip the preference ourselves (both pref
-    // section names, old and new AE). Returns true when the permission is on.
-    function securityOn() {
-        var sections = ["Main Pref Section v2", "Main Pref Section"];
-        for (var i = 0; i < sections.length; i++) {
-            try {
-                if (app.preferences.getPrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY",
-                        PREFType.PREF_Type_MACHINE_INDEPENDENT) === 1) return true;
-            } catch (e) {}
-            try {
-                if (app.preferences.getPrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY") === 1) return true;
-            } catch (e2) {}
-        }
-        return false;
+    // ---- palette (mirrors the Premiere panel) --------------------------------
+    var C = {
+        blue:  [0.078, 0.451, 0.902],   // #1473e6
+        blue2: [0.306, 0.631, 0.969],   // #4ea1f7
+        green: [0.200, 0.671, 0.373],   // #33ab5f
+        gold:  [0.886, 0.639, 0.243],   // #e2a33e
+        red:   [0.890, 0.282, 0.314],   // #e34850
+        text:  [0.835, 0.835, 0.835],   // #d4d4d4
+        sec:   [0.561, 0.561, 0.561],   // #8f8f8f
+        line:  [0.239, 0.239, 0.239],   // #3d3d3d
+        fld:   [0.106, 0.106, 0.118],   // field bg
+        seg:   [0.145, 0.153, 0.176],   // segment bg
+        white: [1, 1, 1]
+    };
+    function font(sz, bold) {
+        try { return ScriptUI.newFont("Helvetica", bold ? "Bold" : "Regular", sz); }
+        catch (e) { try { return ScriptUI.newFont("dialog", bold ? "Bold" : "Regular", sz); } catch (e2) { return undefined; } }
     }
-    function enableSecurity() {
-        if (securityOn()) return true;
-        var sections = ["Main Pref Section v2", "Main Pref Section"];
-        for (var i = 0; i < sections.length; i++) {
-            try {
-                app.preferences.savePrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1,
-                    PREFType.PREF_Type_MACHINE_INDEPENDENT);
-            } catch (e) {}
-            try { app.preferences.savePrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1); } catch (e2) {}
-        }
-        try { app.preferences.saveToDisk(); app.preferences.reload(); } catch (e3) {}
-        return securityOn();
-    }
+    var F = { reg: font(12, false), bold: font(12, true), lbl: font(9, true), big: font(13, true), logo: font(15, true) };
 
-    // ---- tiny helpers --------------------------------------------------------
-    function tmpPath(name) { return Folder.temp.fsName + "/" + name; }
+    // ---- draw helpers --------------------------------------------------------
+    function rect(g, x, y, w, h, col) { g.newPath(); g.rectPath(x, y, w, h); g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, col)); }
+    function stroke(g, x, y, w, h, col) { g.newPath(); g.rectPath(x, y, w, h); g.strokePath(g.newPen(g.PenType.SOLID_COLOR, col, 1)); }
+    function str(g, s, x, y, col, f) { g.drawString(s, g.newPen(g.PenType.SOLID_COLOR, col, 1), x, y, f || F.reg); }
+    function strC(g, s, w, h, col, f) { f = f || F.reg; var m; try { m = g.measureString(s, f, w); } catch (e) { m = [g.measureString(s, f)[0], 14]; } str(g, s, (w - m[0]) / 2, (h - m[1]) / 2, col, f); }
 
-    function writeText(path, txt) {
-        var f = new File(path); f.encoding = "UTF-8";
-        if (!f.open("w")) return false;
-        f.write(txt); f.close(); return true;
-    }
-    function readText(path) {
-        var f = new File(path); if (!f.exists) return "";
-        f.encoding = "UTF-8"; if (!f.open("r")) return "";
-        var s = f.read(); f.close(); return s;
-    }
-    function baseName(p) {
-        if (!p) return "";
-        var parts = p.split(/[\\\/]/); return parts[parts.length - 1];
-    }
-    function match1(str, re) { var m = str.match(re); return m ? m[1] : null; }
-    // ExtendScript (ES3) has no JSON — quote a string as a JSON value by hand.
-    // Escapes backslashes (Windows paths) and double quotes.
+    // ---- tiny io / net helpers ----------------------------------------------
+    function tmpPath(n) { return Folder.temp.fsName + "/" + n; }
+    function writeText(p, t) { var f = new File(p); f.encoding = "UTF-8"; if (!f.open("w")) return false; f.write(t); f.close(); return true; }
+    function readText(p) { var f = new File(p); if (!f.exists) return ""; f.encoding = "UTF-8"; if (!f.open("r")) return ""; var s = f.read(); f.close(); return s; }
+    function baseName(p) { if (!p) return ""; var a = p.split(/[\\\/]/); return a[a.length - 1]; }
+    function m1(s, re) { var m = s.match(re); return m ? m[1] : null; }
     function jstr(s) { return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
 
-    // POST jsonBody to endpoint via curl; return the response body (string).
-    function curlPost(endpoint, jsonBody) {
-        var req = tmpPath("cmk_ae_req.json");
-        var resp = tmpPath("cmk_ae_resp.json");
-        if (!writeText(req, jsonBody)) throw new Error(
-            "Can't write temp files. Enable Preferences > Scripting & Expressions >\n" +
-            "\"Allow Scripts to Write Files and Access Network\".");
+    // self-grant AE's file/network permission (best-effort; the installer also sets it)
+    function enableSecurity() {
+        var secs = ["Main Pref Section v2", "Main Pref Section"], on = false;
+        for (var i = 0; i < secs.length; i++) {
+            try { if (app.preferences.getPrefAsLong(secs[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", PREFType.PREF_Type_MACHINE_INDEPENDENT) === 1) on = true; } catch (e) {}
+        }
+        if (on) return true;
+        for (var j = 0; j < secs.length; j++) {
+            try { app.preferences.savePrefAsLong(secs[j], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1, PREFType.PREF_Type_MACHINE_INDEPENDENT); } catch (e2) {}
+        }
+        try { app.preferences.saveToDisk(); app.preferences.reload(); } catch (e3) {}
+        try { return app.preferences.getPrefAsLong("Main Pref Section v2", "Pref_SCRIPTING_FILE_NETWORK_SECURITY", PREFType.PREF_Type_MACHINE_INDEPENDENT) === 1; } catch (e4) { return false; }
+    }
+    function curlPost(endpoint, body) {
+        var req = tmpPath("cmk_ae_req.json"), resp = tmpPath("cmk_ae_resp.json");
+        if (!writeText(req, body)) throw new Error("Can't write temp files (enable AE scripting/network permission).");
         var rf = new File(resp); if (rf.exists) rf.remove();
-        var cmd = 'curl -s -X POST "' + SERVER + endpoint + '"' +
-                  ' -H "Content-Type: application/json"' +
-                  ' --data-binary "@' + req + '"' +
-                  ' -o "' + resp + '"';
-        system.callSystem(cmd);   // blocks until curl finishes
+        system.callSystem('curl -s -X POST "' + SERVER + endpoint + '" -H "Content-Type: application/json" --data-binary "@' + req + '" -o "' + resp + '"');
         return readText(resp);
     }
 
-    // ---- After Effects project actions --------------------------------------
-    function activeComp() {
-        var c = app.project ? app.project.activeItem : null;
-        return (c && c instanceof CompItem) ? c : null;
-    }
-    function selectedFootageLayer(comp) {
-        var sel = comp.selectedLayers;
-        for (var i = 0; i < sel.length; i++) {
-            var L = sel[i];
-            try { if (L.source && L.source.mainSource && L.source.mainSource.file) return L; } catch (e) {}
-        }
+    // ---- AE project actions --------------------------------------------------
+    function activeComp() { var c = app.project ? app.project.activeItem : null; return (c && c instanceof CompItem) ? c : null; }
+    function selLayer(comp) {
+        var s = comp.selectedLayers;
+        for (var i = 0; i < s.length; i++) { try { if (s[i].source && s[i].source.mainSource && s[i].source.mainSource.file) return s[i]; } catch (e) {} }
         return null;
     }
-    function layerSourcePath(L) {
-        try { return L.source.mainSource.file.fsName; } catch (e) { return null; }
-    }
+    function srcPathOf(L) { try { return L.source.mainSource.file.fsName; } catch (e) { return null; } }
     function ensureEffect(L) {
-        var parade = L.property("ADBE Effect Parade");
-        for (var i = 1; i <= parade.numProperties; i++) {
-            var p = parade.property(i);
-            if (p && (p.matchName === EFFECT_MATCH || p.name === EFFECT_NAME)) return p;
-        }
-        try { return parade.addProperty(EFFECT_MATCH); }
-        catch (e) { return parade.addProperty(EFFECT_NAME); }
+        var par = L.property("ADBE Effect Parade");
+        for (var i = 1; i <= par.numProperties; i++) { var p = par.property(i); if (p && (p.matchName === EFFECT_MATCH || p.name === EFFECT_NAME)) return p; }
+        try { return par.addProperty(EFFECT_MATCH); } catch (e) { return par.addProperty(EFFECT_NAME); }
     }
-    function setParam(fx, name, value) {
-        try { fx.property(name).setValue(value); return true; } catch (e) { return false; }
-    }
+    function setP(fx, n, v) { try { fx.property(n).setValue(v); return true; } catch (e) { return false; } }
 
-    // ---- the workflow --------------------------------------------------------
-    function doMatch(ui, mode, look) {
-        var comp = activeComp();
-        if (!comp) return ui.status("Open a composition first.", true);
-        var L = selectedFootageLayer(comp);
-        if (!L) return ui.status("Select the TARGET footage layer in the timeline.", true);
-        if (!state.refPath) return ui.status("Pick a REFERENCE clip first.", true);
-        var srcPath = layerSourcePath(L);
-        if (!srcPath) return ui.status("The selected layer has no source file.", true);
+    // ---- workflow ------------------------------------------------------------
+    function doMatch(ui) {
+        var comp = activeComp(); if (!comp) return ui.status("Open a composition first.", "error");
+        var L = selLayer(comp); if (!L) return ui.status("Select the TARGET footage layer in the timeline.", "error");
+        if (!state.refPath) return ui.status("Pick a REFERENCE clip first.", "error");
+        var sp = srcPathOf(L); if (!sp) return ui.status("The selected layer has no source file.", "error");
+        if (!enableSecurity()) return ui.status("Enable AE Preferences > Scripting & Expressions > Allow Scripts to Write Files and Access Network.", "error");
 
-        if (!enableSecurity()) return ui.status(
-            "Enable Preferences > Scripting & Expressions > \"Allow Scripts to Write Files and Access Network\", then try again.", true);
+        ui.status("Matching… After Effects pauses for a few seconds.", "busy");
+        var body = '{"source_path":' + jstr(sp) + ',"reference_path":' + jstr(state.refPath) +
+                   ',"mode":"' + state.mode + '","tf":"sRGB","frames":7,"look":"' + state.look + '"}';
+        var resp; try { resp = curlPost("/match_paths", body); } catch (e) { return ui.status(String(e.message || e), "error"); }
+        if (!resp) return ui.status("Can't reach the engine at " + SERVER + " — is colourMatik running?", "error");
+        if (!/"ok"\s*:\s*true/.test(resp)) return ui.status("Match failed: " + (m1(resp, /"error"\s*:\s*"([^"]*)"/) || "unknown"), "error");
+        var rid = m1(resp, /"rid"\s*:\s*"([a-f0-9]+)"/); if (!rid) return ui.status("Match returned no id.", "error");
+        var resp2; try { resp2 = curlPost("/effect_lut", '{"rid":"' + rid + '"}'); } catch (e2) { return ui.status(String(e2.message || e2), "error"); }
+        var slot = m1(resp2 || "", /"slot"\s*:\s*(\d+)/); if (!slot) return ui.status("Couldn't bake the effect LUT slot.", "error");
 
-        ui.status("Matching… (After Effects pauses for a few seconds)", false);
-
-        var body = '{"source_path":' + jstr(srcPath) +
-                   ',"reference_path":' + jstr(state.refPath) +
-                   ',"mode":"' + mode + '","tf":"sRGB","frames":7,"look":"' + look + '"}';
-        var resp;
-        try { resp = curlPost("/match_paths", body); }
-        catch (e) { return ui.status(String(e.message || e), true); }
-
-        if (!resp) return ui.status("Can't reach the engine at " + SERVER +
-            " — is colourMatik running? (start ~/colourMatik/colourmatik-app)", true);
-        if (!/"ok"\s*:\s*true/.test(resp)) {
-            var err = match1(resp, /"error"\s*:\s*"([^"]*)"/);
-            return ui.status("Match failed: " + (err || "unknown error"), true);
-        }
-        var rid = match1(resp, /"rid"\s*:\s*"([a-f0-9]+)"/);
-        if (!rid) return ui.status("Match returned no id.", true);
-
-        // bake the 65^3 LUT into a fresh slot for the native effect
-        var resp2;
-        try { resp2 = curlPost("/effect_lut", '{"rid":"' + rid + '"}'); }
-        catch (e2) { return ui.status(String(e2.message || e2), true); }
-        var slot = match1(resp2 || "", /"slot"\s*:\s*(\d+)/);
-        if (!slot) return ui.status("Couldn't bake the effect LUT slot.", true);
-
-        // apply the effect + point it at the slot
         app.beginUndoGroup("colourMatik: Match & Apply");
-        try {
-            var fx = ensureEffect(L);
-            setParam(fx, "Match Slot", parseInt(slot, 10));
-            setParam(fx, "Intensity", 100);
-            ui.setIntensity(100);
-        } catch (e3) {
-            app.endUndoGroup();
-            return ui.status("Applied the match, but couldn't add the effect: " + e3, true);
-        }
+        try { var fx = ensureEffect(L); setP(fx, "Match Slot", parseInt(slot, 10)); setP(fx, "Intensity", 100); ui.setIntensity(100); }
+        catch (e3) { app.endUndoGroup(); return ui.status("Applied the match, but couldn't add the effect: " + e3, "error"); }
         app.endUndoGroup();
-        var m = match1(resp, /"method_label"\s*:\s*"([^"]*)"/) || match1(resp, /"method"\s*:\s*"([^"]*)"/) || "";
-        ui.status("Done — " + m + ". colourMatik applied; drag Intensity to adjust.", false);
+        var lbl = m1(resp, /"method_label"\s*:\s*"([^"]*)"/) || m1(resp, /"method"\s*:\s*"([^"]*)"/) || "";
+        ui.status("Done — " + lbl + ". Drag Intensity to adjust (live).", "done");
     }
-
     function applyIntensityLive(v) {
-        var comp = activeComp(); if (!comp) return;
-        var L = selectedFootageLayer(comp); if (!L) return;
-        var parade = L.property("ADBE Effect Parade");
-        for (var i = 1; i <= parade.numProperties; i++) {
-            var p = parade.property(i);
-            if (p && (p.matchName === EFFECT_MATCH || p.name === EFFECT_NAME)) {
-                app.beginUndoGroup("colourMatik: Intensity");
-                setParam(p, "Intensity", v);
-                app.endUndoGroup();
-                return;
-            }
-        }
+        var comp = activeComp(); if (!comp) return; var L = selLayer(comp); if (!L) return;
+        var par = L.property("ADBE Effect Parade");
+        for (var i = 1; i <= par.numProperties; i++) { var p = par.property(i); if (p && (p.matchName === EFFECT_MATCH || p.name === EFFECT_NAME)) { app.beginUndoGroup("colourMatik: Intensity"); setP(p, "Intensity", v); app.endUndoGroup(); return; } }
     }
 
-    // ---- UI -------------------------------------------------------------------
-    function build(thisObj) {
-        var win = (thisObj instanceof Panel) ? thisObj
-                  : new Window("palette", "colourMatik", undefined, { resizeable: true });
-        win.orientation = "column";
-        win.alignChildren = ["fill", "top"];
-        win.spacing = 8; win.margins = 12;
+    // ---- custom-drawn controls ----------------------------------------------
+    // a flat clickable "button" via iconbutton + onDraw
+    function makeBtn(parent, w, h, drawFn, onClick) {
+        var b = parent.add("iconbutton", undefined, undefined, { style: "toolbutton" });
+        b.preferredSize = [w, h];
+        b.onDraw = function () { try { drawFn(this.graphics, this.size[0], this.size[1]); } catch (e) {} };
+        if (onClick) b.onClick = onClick;
+        return b;
+    }
+    // Force a custom control to repaint. onDraw isn't a notify-able event, so the
+    // reliable trigger is re-assigning size (invalidates -> repaint); try a couple.
+    function redraw(c) { try { c.size = c.size; } catch (e) {} try { c.notify("onDraw"); } catch (e2) {} }
 
-        var title = win.add("statictext", undefined, "colourMatik  —  match colours to a reference");
-        try { title.graphics.font = ScriptUI.newFont(title.graphics.font.name, "BOLD", 13); } catch (e) {}
+    // ---- UI ------------------------------------------------------------------
+    function build(thisObj) {
+        var win = (thisObj instanceof Panel) ? thisObj : new Window("palette", "colourMatik", undefined, { resizeable: true });
+        win.orientation = "column"; win.alignChildren = ["left", "top"]; win.spacing = 12; win.margins = 14;
+
+        // brand header: 3 colour bars + colourMatik
+        makeBtn(win, W, 30, function (g, w, h) {
+            var bx = 0, bw = 6, gap = 1, top = 6, bh = 18;
+            rect(g, bx, top, bw, bh, C.blue2); rect(g, bx + bw + gap, top, bw, bh, C.green); rect(g, bx + 2 * (bw + gap), top, bw, bh, C.gold);
+            var tx = 3 * (bw + gap) + 8;
+            str(g, "colour", tx, 6, C.text, F.logo);
+            var mw; try { mw = g.measureString("colour", F.logo)[0]; } catch (e) { mw = 46; }
+            str(g, "Matik", tx + mw, 6, C.blue2, F.logo);
+        });
+        sep(win);
+
+        function labelRow(t) { var s = win.add("statictext", undefined, t); s.graphics.foregroundColor = s.graphics.newPen(s.graphics.PenType.SOLID_COLOR, C.sec, 1); try { s.graphics.font = F.lbl; } catch (e) {} return s; }
 
         // Reference
-        var gRef = win.add("group"); gRef.alignChildren = ["left", "center"]; gRef.spacing = 8;
-        var refBtn = gRef.add("button", undefined, "Set Reference clip…");
-        var refTxt = gRef.add("statictext", undefined, "no reference", { truncate: "middle" });
-        refTxt.preferredSize.width = 220;
+        labelRow("REFERENCE — THE LOOK TO COPY");
+        var refState = { name: "No clip selected", set: false };
+        var refRow = win.add("group"); refRow.spacing = 8; refRow.alignChildren = ["left", "center"];
+        makeBtn(refRow, 34, 30, function (g, w, h) { rect(g, 0, 0, w, h, C.fld); stroke(g, 0, 0, w, h, C.line); strC(g, "◉", w, h, C.blue2, F.big); }, function () {
+            var f = File.openDialog("Choose the REFERENCE clip (the look to copy)");
+            if (f) { state.refPath = f.fsName; refState.name = baseName(state.refPath); refState.set = true; redraw(refField); }
+        });
+        var refField = makeBtn(refRow, W - 34 - 8, 30, function (g, w, h) { rect(g, 0, 0, w, h, C.fld); stroke(g, 0, 0, w, h, C.line); str(g, refState.name, 10, (h - 12) / 2, refState.set ? C.green : C.sec, F.reg); });
 
-        // Target hint
-        var tgt = win.add("statictext", undefined, "Target = the selected footage layer in the timeline.");
-        tgt.graphics.foregroundColor = tgt.graphics.newPen(tgt.graphics.PenType.SOLID_COLOR, [0.6, 0.6, 0.66, 1], 1);
+        // Target
+        labelRow("TARGET — THE SELECTED FOOTAGE LAYER");
+        var tgt = win.add("statictext", undefined, "colourMatik uses the layer you select in the timeline.");
+        tgt.graphics.foregroundColor = tgt.graphics.newPen(tgt.graphics.PenType.SOLID_COLOR, C.sec, 1);
 
-        // Options
-        var gOpt = win.add("group"); gOpt.spacing = 16;
-        var pScene = gOpt.add("panel", undefined, "Scene"); pScene.orientation = "row"; pScene.margins = 8;
-        var rDiff = pScene.add("radiobutton", undefined, "Different"); rDiff.value = true;
-        var rSame = pScene.add("radiobutton", undefined, "Same");
-        var pLook = gOpt.add("panel", undefined, "Match"); pLook.orientation = "row"; pLook.margins = 8;
-        var rAcc = pLook.add("radiobutton", undefined, "Accurate"); rAcc.value = true;
-        var rAI = pLook.add("radiobutton", undefined, "Cinematic AI");
+        // segmented control (two options)
+        function segmented(sel0, a, b, onSel) {
+            var st = { sel: sel0 };
+            var g = win.add("group"); g.spacing = 0; g.alignChildren = ["left", "center"];
+            var halves = [];
+            function drawHalf(idx, label) {
+                return function (gr, w, h) {
+                    var on = (st.sel === idx);
+                    rect(gr, 0, 0, w, h, on ? C.blue : C.seg);
+                    if (idx === 0) stroke(gr, 0, 0, w, h, C.line); else stroke(gr, 0, 0, w, h, C.line);
+                    strC(gr, label, w, h, on ? C.white : C.sec, F.bold);
+                };
+            }
+            var hw = W / 2;
+            halves[0] = makeBtn(g, hw, 30, drawHalf(0, a), function () { st.sel = 0; redraw(halves[0]); redraw(halves[1]); onSel(0); });
+            halves[1] = makeBtn(g, hw, 30, drawHalf(1, b), function () { st.sel = 1; redraw(halves[0]); redraw(halves[1]); onSel(1); });
+            return st;
+        }
+        labelRow("SCENE");
+        segmented(0, "Different scene", "Same scene", function (i) { state.mode = i === 0 ? "different" : "same"; });
+        labelRow("MATCH TYPE");
+        segmented(0, "Accurate", "Cinematic AI", function (i) { state.look = i === 0 ? "exact" : "ai_grade"; });
 
-        // Match & Apply
-        var runBtn = win.add("button", undefined, "MATCH & APPLY");
-        runBtn.preferredSize.height = 34;
+        // MATCH & APPLY (big blue)
+        var runBtn = makeBtn(win, W, 38, function (g, w, h) { rect(g, 0, 0, w, h, C.blue); strC(g, "MATCH & APPLY", w, h, C.white, F.big); }, function () {
+            runBtn.enabled = false; try { doMatch(ui); } finally { runBtn.enabled = true; }
+        });
 
         // Intensity
-        var gInt = win.add("group"); gInt.alignChildren = ["left", "center"];
-        gInt.add("statictext", undefined, "Intensity");
-        var sInt = gInt.add("slider", undefined, 100, 0, 200); sInt.preferredSize.width = 190;
-        var vInt = gInt.add("statictext", undefined, "100%"); vInt.preferredSize.width = 44;
+        labelRow("INTENSITY");
+        var iRow = win.add("group"); iRow.alignChildren = ["left", "center"]; iRow.spacing = 8;
+        var sInt = iRow.add("slider", undefined, 100, 0, 200); sInt.preferredSize = [W - 56, 18];
+        var vInt = iRow.add("statictext", undefined, "100%"); vInt.preferredSize.width = 48;
+        vInt.graphics.foregroundColor = vInt.graphics.newPen(vInt.graphics.PenType.SOLID_COLOR, C.blue2, 1); try { vInt.graphics.font = F.bold; } catch (e) {}
 
-        // Status
-        var stat = win.add("statictext", undefined, "Pick a reference, select a layer, Match & Apply.",
-                           { truncate: "end" });
-        stat.preferredSize.width = 300;
+        sep(win);
+        // status
+        var statText = "Pick a reference, select a layer, Match & Apply.";
+        var statCol = C.sec;
+        var statBox = makeBtn(win, W, 46, function (g, w, h) { rect(g, 0, 0, w, h, C.fld); stroke(g, 0, 0, w, h, C.line); str(g, statText, 10, 8, statCol, F.reg); });
+        statBox.enabled = true;
+
+        // footer
+        var foot = win.add("statictext", undefined, "colourMatik · Local · nothing uploaded · catheadai.com");
+        foot.graphics.foregroundColor = foot.graphics.newPen(foot.graphics.PenType.SOLID_COLOR, C.sec, 1);
 
         var ui = {
-            status: function (msg, isErr) {
-                stat.text = msg;
-                var col = isErr ? [1, 0.42, 0.42, 1] : [0.55, 0.85, 0.55, 1];
-                try { stat.graphics.foregroundColor = stat.graphics.newPen(stat.graphics.PenType.SOLID_COLOR, col, 1); } catch (e) {}
-                try { win.update(); } catch (e2) {}
-            },
+            status: function (msg, kind) { statText = msg; statCol = kind === "error" ? C.red : kind === "done" ? C.green : kind === "busy" ? C.blue2 : C.sec; redraw(statBox); },
             setIntensity: function (v) { sInt.value = v; vInt.text = Math.round(v) + "%"; }
-        };
-
-        refBtn.onClick = function () {
-            var f = File.openDialog("Choose the REFERENCE clip (the look to copy)");
-            if (f) { state.refPath = f.fsName; refTxt.text = baseName(state.refPath); }
-        };
-        runBtn.onClick = function () {
-            runBtn.enabled = false;
-            try { doMatch(ui, rSame.value ? "same" : "different", rAI.value ? "ai_grade" : "exact"); }
-            finally { runBtn.enabled = true; }
         };
         sInt.onChanging = function () { vInt.text = Math.round(sInt.value) + "%"; };
         sInt.onChange = function () { applyIntensityLive(Math.round(sInt.value)); };
 
-        var footer = win.add("statictext", undefined, "Local · nothing uploaded · catheadai.com");
-        footer.graphics.foregroundColor = footer.graphics.newPen(footer.graphics.PenType.SOLID_COLOR, [0.5, 0.5, 0.56, 1], 1);
-
+        win.onResizing = win.onResize = function () { this.layout.resize(); };
         win.layout.layout(true);
         return win;
     }
+    function sep(win) { var p = win.add("panel"); p.alignment = ["fill", "top"]; p.preferredSize.height = 1; p.maximumSize.height = 1; }
 
     var w = build(thisObj);
-    try { enableSecurity(); } catch (e) {}   // zero-config: grant ourselves file/network on first open
+    try { enableSecurity(); } catch (e) {}
     if (w instanceof Window) { w.center(); w.show(); }
 })(this);
