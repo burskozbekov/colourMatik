@@ -5,8 +5,14 @@
  * Effect identity (colourmatik-fx/colourMatik.cpp): Match Name "catheadai colourMatik",
  * params "Intensity" and "Match Slot" (float sliders).
  */
-var CM_EFFECT_MATCH = "catheadai colourMatik";
-var CM_EFFECT_NAME  = "colourMatik";
+/* The Premiere (MediaCore) build's match name is "catheadai colourMatik"; the AE
+ * build's is "catheadaiAEcolorMatik" (distinct so AE doesn't flag a duplicate).
+ * BOTH display as "colourMatik". Match on any of these; add by the AE match name,
+ * then the display name, then the Premiere match name. */
+var CM_EFFECT_MATCH   = "catheadai colourMatik";
+var CM_EFFECT_MATCH_AE = "catheadaiAEcolorMatik";
+var CM_EFFECT_NAME    = "colourMatik";
+var CM_ADD_NAMES = [CM_EFFECT_MATCH_AE, CM_EFFECT_NAME, CM_EFFECT_MATCH];
 
 function cm_esc(s) {
     s = String(s); var o = "", i, c;
@@ -50,33 +56,40 @@ function cm_selLayer(comp) {
     return null;
 }
 
-/* Resolve a layer to a still image the engine can read. A footage layer with a
- * file uses the file directly; anything else (PRECOMP, solid, text, shape) is
- * rendered to a temp PNG at its current frame — so precomps just work. */
+/* Resolve a layer to a still image the engine can read. Footage-with-file uses the
+ * file directly; a PRECOMP (or solid/text/shape) is rendered to a temp PNG.
+ * Returns { path: string|null, diag: string } — diag surfaces WHY it failed. */
+var _cmDiag = "";
+// Does the file exist AND is it readable? File.exists is cached by ExtendScript and
+// unreliable after an external write (saveFrameToPng); open("r") forces a real stat.
+function cm_fileReadable(path) {
+    var f = new File(path); f.encoding = "BINARY";
+    if (f.open("r")) { f.close(); return true; }
+    return false;
+}
 function cm_layerImagePath(L) {
+    _cmDiag = "";
     // 1) plain footage file
     try {
         if (L.source && L.source.mainSource && (L.source.mainSource instanceof FileSource) && L.source.mainSource.file)
             return L.source.mainSource.file.fsName;
     } catch (e) {}
-    // 2) precomp -> render the SOURCE comp's current frame
+    // 2) render a frame: the precomp's OWN comp, else the containing comp
+    var target = null;
+    try { if (L.source && (L.source instanceof CompItem)) target = L.source; } catch (e2) {}
+    if (!target) { try { target = cm_activeComp(); } catch (e3) {} }
+    if (!target) { _cmDiag += "no-renderable-comp "; return null; }
+    if (typeof target.saveFrameToPng !== "function") { _cmDiag += "needs AE 2022+ "; return null; }
+
+    var dir = Folder.temp; try { if (!dir || !dir.exists) dir = Folder.userData; } catch (eD) {}
+    var png = new File(dir.fsName + "/cmk_" + (new Date()).getTime() + ".png");
     try {
-        if (L.source && (L.source instanceof CompItem)) {
-            var png1 = new File(Folder.temp.fsName + "/cmk_" + (new Date()).getTime() + "_" + L.index + ".png");
-            L.source.saveFrameToPng(L.source.time, png1);
-            if (png1.exists) return png1.fsName;
-        }
-    } catch (e2) {}
-    // 3) any other AV layer -> render the CONTAINING comp's current frame (best effort)
-    try {
-        var comp = cm_activeComp();
-        if (comp) {
-            var png2 = new File(Folder.temp.fsName + "/cmk_" + (new Date()).getTime() + "_c.png");
-            comp.saveFrameToPng(comp.time, png2);
-            if (png2.exists) return png2.fsName;
-        }
-    } catch (e3) {}
-    return null;
+        target.saveFrameToPng(0, png);
+        // saveFrameToPng writes on disk but leaves File.exists stale; confirm by
+        // actually opening the file for reading (or trust no-throw as a last resort).
+        if (cm_fileReadable(png.fsName)) return png.fsName;
+        return png.fsName; // written but a cached listing hid it — the engine will read it
+    } catch (e4) { _cmDiag += "render error: " + e4.toString() + " "; return null; }
 }
 function cm_layerByIndex(comp, idx) {
     idx = Number(idx);
@@ -85,7 +98,19 @@ function cm_layerByIndex(comp, idx) {
 }
 function cm_findEffect(L) {
     var par = L.property("ADBE Effect Parade"), i, p;
-    for (i = 1; i <= par.numProperties; i++) { p = par.property(i); if (p && (p.matchName === CM_EFFECT_MATCH || p.name === CM_EFFECT_NAME)) return p; }
+    for (i = 1; i <= par.numProperties; i++) {
+        p = par.property(i);
+        if (p && (p.name === CM_EFFECT_NAME || p.matchName === CM_EFFECT_MATCH || p.matchName === CM_EFFECT_MATCH_AE)) return p;
+    }
+    return null;
+}
+/* add the colourMatik effect, trying each known name (AE match, display, Pr match) */
+function cm_addEffect(par) {
+    var k, nm;
+    for (k = 0; k < CM_ADD_NAMES.length; k++) {
+        nm = CM_ADD_NAMES[k];
+        try { if (par.canAddProperty(nm)) return par.addProperty(nm); } catch (e) {}
+    }
     return null;
 }
 
@@ -96,7 +121,7 @@ function cm_getSelectedSourcePath() {
         var comp = cm_activeComp(); if (!comp) return cm_res(false, "Open a composition first.");
         var L = cm_selLayer(comp);  if (!L)   return cm_res(false, "Select a layer in the timeline.");
         var path = cm_layerImagePath(L);
-        if (!path) return cm_res(false, "Couldn't read that layer — select a footage or precomp layer.");
+        if (!path) return cm_res(false, "Couldn't read '" + L.name + "'. " + _cmDiag);
         return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index);
     } catch (e) { return cm_res(false, "Error: " + e.toString()); }
 }
@@ -110,8 +135,8 @@ function cm_apply(slot, intensity, layerIndex) {
         var par = L.property("ADBE Effect Parade"); if (!par) return cm_res(false, "This layer cannot hold effects.");
         var fx = cm_findEffect(L);
         if (!fx) {
-            if (!par.canAddProperty(CM_EFFECT_MATCH)) return cm_res(false, "colourMatik effect not installed — restart After Effects once after installing it.");
-            fx = par.addProperty(CM_EFFECT_MATCH);
+            fx = cm_addEffect(par);
+            if (!fx) return cm_res(false, "colourMatik effect not installed — restart After Effects once after installing it.");
         }
         var pSlot = fx.property("Match Slot"), pInt = fx.property("Intensity");
         if (pSlot && pSlot.numKeys === 0) pSlot.setValue(Number(slot));
