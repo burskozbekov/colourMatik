@@ -23,7 +23,25 @@ function cm_res(ok, msg, extra) {
     if (extra) s += ',' + extra;
     return s + '}';
 }
-function cm_activeComp() { var c = app.project ? app.project.activeItem : null; return (c && c instanceof CompItem) ? c : null; }
+function cm_activeComp() {
+    // Reading app.project.activeItem while the CEP panel has focus can throw AE's
+    // "internal verification failure {no current context}" alert. Giving the comp
+    // viewer focus first (activeViewer.setActive()) restores a valid context —
+    // the standard workaround used by CEP panels.
+    var c = null;
+    try { if (app.activeViewer) app.activeViewer.setActive(); } catch (e0) {}
+    try { c = app.project ? app.project.activeItem : null; } catch (e1) { c = null; }
+    if (c && c instanceof CompItem) return c;
+    // fallback: if the project has exactly one comp, use it
+    try {
+        var only = null, n = 0, i;
+        for (i = 1; i <= app.project.numItems; i++) {
+            if (app.project.item(i) instanceof CompItem) { n++; only = app.project.item(i); if (n > 1) break; }
+        }
+        if (n === 1) return only;
+    } catch (e2) {}
+    return null;
+}
 function cm_selLayer(comp) {
     var s = comp.selectedLayers, i;
     for (i = 0; i < s.length; i++) {

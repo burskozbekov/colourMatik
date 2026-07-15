@@ -6,6 +6,12 @@
  */
 "use strict";
 var cs = new CSInterface();
+// Load (or re-load) the ExtendScript bridge on every panel open, so host.jsx
+// updates apply on a simple panel close/reopen — no AE restart needed.
+try {
+  var _jsxPath = cs.getSystemPath(SystemPath.EXTENSION).replace(/\\/g, "/") + "/jsx/host.jsx";
+  cs.evalScript('$.evalFile("' + _jsxPath + '")');
+} catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
 var LOCAL_VERSION = "1.2.0";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
