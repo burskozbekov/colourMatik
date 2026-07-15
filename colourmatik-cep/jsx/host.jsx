@@ -81,7 +81,15 @@ function cm_layerImagePath(L) {
     if (!target) { _cmDiag += "no-renderable-comp "; return null; }
     if (typeof target.saveFrameToPng !== "function") { _cmDiag += "needs AE 2022+ "; return null; }
 
-    var dir = Folder.temp; try { if (!dir || !dir.exists) dir = Folder.userData; } catch (eD) {}
+    // IMPORTANT: do NOT use Folder.temp — on macOS AE that is the sandbox-protected
+    // ".../T/TemporaryItems" folder, which the (separately-launched) engine process
+    // gets "Operation not permitted" reading. Write to colourMatik's own support
+    // folder, which the engine reads freely.
+    var dir = new Folder(Folder.userData.fsName + "/colourMatik/aeframes");
+    try { if (!dir.exists) dir.create(); } catch (eD) {}
+    if (!dir.exists) { dir = Folder.temp; }   // last-resort fallback
+    // prune old frames so the folder doesn't grow unbounded
+    try { var old = dir.getFiles("cmk_*.png"), oi; if (old) for (oi = 0; oi < old.length; oi++) { try { old[oi].remove(); } catch (eR) {} } } catch (eP) {}
     var png = new File(dir.fsName + "/cmk_" + (new Date()).getTime() + ".png");
     try {
         target.saveFrameToPng(0, png);
