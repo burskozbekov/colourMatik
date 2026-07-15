@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<ExtensionManifest
+    Version="11.0"
+    ExtensionBundleId="com.catheadai.colourmatik"
+    ExtensionBundleVersion="1.2.0"
+    ExtensionBundleName="colourMatik"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.catheadai.colourmatik.panel" Version="1.2.0" />
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <!-- AEFT = After Effects. Wide range so the panel doesn't vanish on AE
+           updates. [16.0,99.9] covers AE 2019..2026 (24/25/26.x all < 99.9). -->
+      <Host Name="AEFT" Version="[16.0,99.9]" />
+    </HostList>
+    <LocaleList>
+      <Locale Code="All" />
+    </LocaleList>
+    <RequiredRuntimeList>
+      <!-- Must be <= 11 so AE 2024 (CEP 11) still loads it; AE 2025/2026 (CEP 12)
+           satisfy 11.0 too. NEVER set 12.0 (would exclude 2024). -->
+      <RequiredRuntime Name="CSXS" Version="11.0" />
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.catheadai.colourmatik.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./client/index.html</MainPath>
+          <ScriptPath>./jsx/host.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+            <Parameter>--allow-file-access-from-files</Parameter>
+            <Parameter>--disable-application-cache</Parameter>
+            <Parameter>--disable-cache</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>colourMatik</Menu>
+          <Geometry>
+            <Size><Height>560</Height><Width>340</Width></Size>
+            <MinSize><Height>360</Height><Width>300</Width></MinSize>
+            <MaxSize><Height>1400</Height><Width>900</Width></MaxSize>
+          </Geometry>
+          <Icons>
+            <Icon Type="Normal">./icons/icon-32.png</Icon>
+            <Icon Type="RollOver">./icons/icon-32.png</Icon>
+            <Icon Type="Disabled">./icons/icon-32.png</Icon>
+          </Icons>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>
