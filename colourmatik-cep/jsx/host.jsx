@@ -29,25 +29,62 @@ function cm_res(ok, msg, extra) {
     if (extra) s += ',' + extra;
     return s + '}';
 }
-function cm_activeComp() {
-    // Reading app.project.activeItem while the CEP panel has focus can throw AE's
-    // "internal verification failure {no current context}" alert. Giving the comp
-    // viewer focus first (activeViewer.setActive()) restores a valid context —
-    // the standard workaround used by CEP panels.
-    var c = null;
-    try { if (app.activeViewer) app.activeViewer.setActive(); } catch (e0) {}
-    try { c = app.project ? app.project.activeItem : null; } catch (e1) { c = null; }
-    if (c && c instanceof CompItem) return c;
-    // fallback: if the project has exactly one comp, use it
+// $.global survives across separate CEP evalScript calls in the same ES engine —
+// where we remember the last-good comp between button clicks.
+if (typeof $.global.cmLastCompId === "undefined") $.global.cmLastCompId = 0;
+
+// Resolve a CompItem using ONLY safe, context-free reads (these never throw the
+// modal; activeItem just returns null when the panel has focus).
+function cm_pickComp() {
+    var proj = null;
+    try { proj = app.project; } catch (eP) {}
+    if (!proj) return null;
+    var c = null, i;
+    // 1) the active item, if it's already a comp
+    try { c = proj.activeItem; } catch (e0) { c = null; }
+    if (c && c instanceof CompItem) { $.global.cmLastCompId = c.id; return c; }
+    // 2) the comp in the active viewer — ONLY if it's a Composition viewer
     try {
-        var only = null, n = 0, i;
-        for (i = 1; i <= app.project.numItems; i++) {
-            if (app.project.item(i) instanceof CompItem) { n++; only = app.project.item(i); if (n > 1) break; }
+        var v = app.activeViewer;
+        if (v && v.type === ViewerType.VIEWER_COMPOSITION) {
+            v.setActive();
+            c = proj.activeItem;
+            if (c && c instanceof CompItem) { $.global.cmLastCompId = c.id; return c; }
         }
-        if (n === 1) return only;
+    } catch (e1) {}
+    // 3) a comp selected in the Project panel
+    try {
+        var sel = proj.selection;
+        for (i = 0; i < sel.length; i++) if (sel[i] instanceof CompItem) { $.global.cmLastCompId = sel[i].id; return sel[i]; }
     } catch (e2) {}
+    // 4) the last comp we successfully used (itemByID is AE 13+)
+    try {
+        var id = $.global.cmLastCompId;
+        if (id) { var it = null; try { it = proj.itemByID(id); } catch (eB) {} if (it && it instanceof CompItem) return it; }
+    } catch (e3) {}
+    // 5) last resort: exactly one comp in the project
+    try {
+        var only = null, n = 0, j;
+        for (j = 1; j <= proj.numItems; j++) if (proj.item(j) instanceof CompItem) { n++; only = proj.item(j); if (n > 1) break; }
+        if (n === 1) return only;
+    } catch (e4) {}
     return null;
 }
+
+// Establish a valid AE "current context" and return the active CompItem (or null).
+// openInViewer() is the load-bearing call: unlike setActive() (which only re-focuses
+// an ALREADY-open comp viewer), it OPENS + focuses a Composition viewer from nothing,
+// so beginUndoGroup / saveFrameToPng / addProperty afterwards can never hit
+// "{no current context}". Selection is preserved (it lives on the CompItem).
+function cm_context() {
+    var comp = cm_pickComp();
+    if (!comp) return null;
+    try { var vw = comp.openInViewer(); if (vw) vw.setActive(); } catch (e0) {}
+    try { if (app.activeViewer && app.activeViewer.type === ViewerType.VIEWER_COMPOSITION) app.activeViewer.setActive(); } catch (e1) {}
+    $.global.cmLastCompId = comp.id;
+    return comp;
+}
+function cm_activeComp() { return cm_context(); }
 /* first selected layer that can hold effects (footage, precomp, solid, text, shape) */
 function cm_selLayer(comp) {
     var s = comp.selectedLayers, i;
@@ -134,11 +171,13 @@ function cm_getSelectedSourcePath() {
     } catch (e) { return cm_res(false, "Error: " + e.toString()); }
 }
 
-/* (B) apply/ensure the effect on the TARGET layer (by remembered index) + set both params */
+/* (B) apply/ensure the effect on the TARGET layer (by remembered index) + set both params.
+ * cm_context() (openInViewer) MUST run BEFORE beginUndoGroup — beginUndoGroup itself
+ * needs a valid current context, so establishing it first is the fix. */
 function cm_apply(slot, intensity, layerIndex) {
+    var comp = cm_context(); if (!comp) return cm_res(false, "Open a composition first.");
     app.beginUndoGroup("colourMatik: Match & Apply");
     try {
-        var comp = cm_activeComp(); if (!comp) return cm_res(false, "Open a composition first.");
         var L = cm_layerByIndex(comp, layerIndex); if (!L) return cm_res(false, "Select the TARGET footage layer in the timeline.");
         var par = L.property("ADBE Effect Parade"); if (!par) return cm_res(false, "This layer cannot hold effects.");
         var fx = cm_findEffect(L);
@@ -156,9 +195,9 @@ function cm_apply(slot, intensity, layerIndex) {
 
 /* (C) live intensity — re-set only the Intensity param on the TARGET layer's effect */
 function cm_setIntensity(v, layerIndex) {
+    var comp = cm_context(); if (!comp) return cm_res(false, "No comp — open a composition first.");
     app.beginUndoGroup("colourMatik: Intensity");
     try {
-        var comp = cm_activeComp(); if (!comp) return cm_res(false, "No comp.");
         var L = cm_layerByIndex(comp, layerIndex); if (!L) return cm_res(false, "No layer.");
         var fx = cm_findEffect(L); if (!fx) return cm_res(false, "No colourMatik effect on the layer.");
         var pInt = fx.property("Intensity");
