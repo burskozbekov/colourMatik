@@ -21,9 +21,18 @@ json.dump(d,open(r,"w"))
 PY
 fi
 
-say "Removing the native effect..."
+say "Removing the native effect (Premiere)..."
 DEST="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/colourMatik.plugin"
 if [ -w "$(dirname "$DEST")" ]; then rm -rf "$DEST"; else sudo rm -rf "$DEST"; fi
+
+say "Removing the After Effects effect + panel..."
+for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
+  [ -d "$AEAPP" ] || continue
+  for T in "$AEAPP/Plug-Ins/colourMatik" "$AEAPP/Scripts/ScriptUI Panels/colourMatik.jsx"; do
+    [ -e "$T" ] || continue
+    if [ -w "$(dirname "$T")" ]; then rm -rf "$T"; else sudo rm -rf "$T"; fi
+  done
+done
 
 say "Removing the colourMatik support folder..."
 rm -rf "$HOME/Library/Application Support/colourMatik"

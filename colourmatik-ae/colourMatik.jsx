@@ -18,6 +18,37 @@
     var EFFECT_NAME = "colourMatik";              // effect display name (fallback)
     var state = { refPath: null };
 
+    // ---- self-enable AE's scripting network/file permission --------------------
+    // The panel needs "Allow Scripts to Write Files and Access Network". Instead of
+    // asking the user to find a checkbox, flip the preference ourselves (both pref
+    // section names, old and new AE). Returns true when the permission is on.
+    function securityOn() {
+        var sections = ["Main Pref Section v2", "Main Pref Section"];
+        for (var i = 0; i < sections.length; i++) {
+            try {
+                if (app.preferences.getPrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY",
+                        PREFType.PREF_Type_MACHINE_INDEPENDENT) === 1) return true;
+            } catch (e) {}
+            try {
+                if (app.preferences.getPrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY") === 1) return true;
+            } catch (e2) {}
+        }
+        return false;
+    }
+    function enableSecurity() {
+        if (securityOn()) return true;
+        var sections = ["Main Pref Section v2", "Main Pref Section"];
+        for (var i = 0; i < sections.length; i++) {
+            try {
+                app.preferences.savePrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1,
+                    PREFType.PREF_Type_MACHINE_INDEPENDENT);
+            } catch (e) {}
+            try { app.preferences.savePrefAsLong(sections[i], "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1); } catch (e2) {}
+        }
+        try { app.preferences.saveToDisk(); app.preferences.reload(); } catch (e3) {}
+        return securityOn();
+    }
+
     // ---- tiny helpers --------------------------------------------------------
     function tmpPath(name) { return Folder.temp.fsName + "/" + name; }
 
@@ -94,6 +125,9 @@
         if (!state.refPath) return ui.status("Pick a REFERENCE clip first.", true);
         var srcPath = layerSourcePath(L);
         if (!srcPath) return ui.status("The selected layer has no source file.", true);
+
+        if (!enableSecurity()) return ui.status(
+            "Enable Preferences > Scripting & Expressions > \"Allow Scripts to Write Files and Access Network\", then try again.", true);
 
         ui.status("Matching… (After Effects pauses for a few seconds)", false);
 
@@ -226,5 +260,6 @@
     }
 
     var w = build(thisObj);
+    try { enableSecurity(); } catch (e) {}   // zero-config: grant ourselves file/network on first open
     if (w instanceof Window) { w.center(); w.show(); }
 })(this);
