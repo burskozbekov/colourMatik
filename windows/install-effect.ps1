@@ -58,4 +58,31 @@ foreach ($aeRoot in $aeRoots) {
         }
     }
 }
+
+# The AE panel's curl needs "Allow Scripts to Write Files and Access Network".
+# A running script can't set it, so write it into each AE version's prefs (same as
+# the checkbox). Prefs live in the LOGGED-IN user's profile — resolve it even when
+# this installer is elevated (APPDATA would otherwise point at the admin profile).
+try {
+    $userProfile = $env:USERPROFILE
+    try {
+        $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
+        if ($ex) { $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
+                   if ($owner.User) { $userProfile = "C:\Users\$($owner.User)" } }
+    } catch {}
+    $aePrefRoot = Join-Path $userProfile "AppData\Roaming\Adobe\After Effects"
+    if (Test-Path $aePrefRoot) {
+        Get-ChildItem $aePrefRoot -Directory | ForEach-Object {
+            Get-ChildItem $_.FullName -Filter "Adobe After Effects * Prefs.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+                $c = Get-Content $_.FullName -Raw
+                if ($c -match '"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "0"') {
+                    ($c -replace '"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "0"', '"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "1"') |
+                        Set-Content $_.FullName -NoNewline -Encoding UTF8
+                    Write-Host "Enabled AE scripting/network -> $($_.Directory.Name)"
+                }
+            }
+        }
+    }
+} catch { Write-Warning "Couldn't set the AE scripting preference automatically: $_" }
+
 Write-Host "Restart Premiere Pro / After Effects, then find it under Effects > colourMatik > colourMatik."

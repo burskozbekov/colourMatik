@@ -121,6 +121,12 @@ if [ -d "$FX" ]; then
       echo "Panel installed for After Effects -> $AESUI/colourMatik.jsx"
     fi
   done
+  # Enable AE's "Allow Scripts to Write Files and Access Network" pref (the panel's
+  # curl needs it; a running script can't set it). Write it into each AE version's
+  # prefs as the user (identical to the checkbox). Runs as the logged-in user so
+  # ownership stays correct.
+  asuser /bin/bash -c 'for PF in "$HOME/Library/Preferences/Adobe/After Effects/"*/"Adobe After Effects "*" Prefs.txt"; do [ -f "$PF" ] || continue; /usr/bin/grep -q "\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"0\"" "$PF" 2>/dev/null && /usr/bin/sed -i "" "s/\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"0\"/\"Pref_SCRIPTING_FILE_NETWORK_SECURITY\" = \"1\"/" "$PF"; done' 2>/dev/null || true
+  echo "After Effects scripting/network permission enabled."
 fi
 
 # 5) start the engine at login (LaunchAgent) + now

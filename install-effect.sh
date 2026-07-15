@@ -54,4 +54,16 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     fi
 done
 
+# The AE panel talks to the local engine via curl, which needs AE's "Allow Scripts
+# to Write Files and Access Network" preference. A running script can't flip it
+# (security), so we write it straight into each AE version's prefs — identical to
+# ticking the checkbox. AE must be closed (it is during a normal install).
+for PF in "$HOME/Library/Preferences/Adobe/After Effects/"*/"Adobe After Effects "*" Prefs.txt"; do
+    [ -f "$PF" ] || continue
+    if grep -q '"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "0"' "$PF" 2>/dev/null; then
+        sed -i '' 's/"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "0"/"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "1"/' "$PF"
+        echo "Enabled scripting/network for $(basename "$(dirname "$PF")")"
+    fi
+done
+
 echo "Restart Premiere Pro / After Effects, then find it under Effects ▸ colourMatik ▸ colourMatik."
