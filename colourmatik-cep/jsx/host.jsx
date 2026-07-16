@@ -185,10 +185,26 @@ function cm_apply(slot, intensity, layerIndex) {
             fx = cm_addEffect(par);
             if (!fx) return cm_res(false, "colourMatik effect not installed — restart After Effects once after installing it.");
         }
+        // Set params — and VERIFY they stuck. A silent miss here means the effect
+        // stays at slot 0 (= identity, no colour change), so report it loudly.
         var pSlot = fx.property("Match Slot"), pInt = fx.property("Intensity");
-        if (pSlot && pSlot.numKeys === 0) pSlot.setValue(Number(slot));
+        if (!pSlot || !pInt) {
+            // fall back to scanning by name (localized/odd hosts)
+            var q, pp;
+            for (q = 1; q <= fx.numProperties; q++) {
+                pp = fx.property(q);
+                if (!pp) continue;
+                if (!pSlot && pp.name === "Match Slot") pSlot = pp;
+                if (!pInt && pp.name === "Intensity") pInt = pp;
+            }
+        }
+        if (!pSlot) return cm_res(false, "Effect added but its 'Match Slot' param wasn't found — is an old colourMatik build installed? Restart After Effects.");
+        if (pSlot.numKeys === 0) pSlot.setValue(Number(slot));
         if (pInt && pInt.numKeys === 0) pInt.setValue(Number(intensity));
-        return cm_res(true, "Applied", '"layer":"' + cm_esc(L.name) + '"');
+        var gotSlot = -1; try { gotSlot = pSlot.value; } catch (eV) {}
+        if (Math.round(gotSlot) !== Math.round(Number(slot)))
+            return cm_res(false, "Couldn't set Match Slot (wanted " + slot + ", effect has " + gotSlot + "). Remove keyframes from the effect and retry.");
+        return cm_res(true, "Applied", '"layer":"' + cm_esc(L.name) + '","slot":' + Math.round(gotSlot));
     } catch (e) { return cm_res(false, "Applied the match, but couldn't add the effect: " + e.toString()); }
     finally { app.endUndoGroup(); }
 }
