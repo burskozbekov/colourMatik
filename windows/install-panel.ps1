@@ -6,11 +6,14 @@
 $ErrorActionPreference = "Stop"
 
 # --- find the panel source (next to this script, or the default install dir) --
-$Self = Split-Path -Parent $MyInvocation.MyCommand.Path
+# $MyInvocation.MyCommand.Path is $null when this is run via Invoke-Expression
+# (the one-line repair), so guard it and always try %USERPROFILE%\colourMatik too.
+$ScriptPath = $MyInvocation.MyCommand.Path
 $Src = $null
-foreach ($cand in @(
-        (Join-Path (Split-Path -Parent $Self) "colourmatik-uxp"),
-        (Join-Path $env:USERPROFILE "colourMatik\colourmatik-uxp"))) {
+$cands = @()
+if ($ScriptPath) { $cands += (Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptPath)) "colourmatik-uxp") }
+$cands += (Join-Path $env:USERPROFILE "colourMatik\colourmatik-uxp")
+foreach ($cand in $cands) {
     if ($cand -and (Test-Path (Join-Path $cand "manifest.json"))) { $Src = $cand; break }
 }
 
