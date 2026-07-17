@@ -69,25 +69,26 @@ Section "colourMatik"
     MessageBox MB_OK|MB_ICONEXCLAMATION "Could not fetch the colourMatik code (code $1). Check your internet connection and run Setup again."
     Abort
 
-  ; --- stage 4: engine + AI (the long one) ------------------------------------
-  DetailPrint "[28%] Setting up the engine + AI. This is the long stage:"
-  DetailPrint "      the AI download is a few GB (10-20 minutes). The log below keeps streaming."
-  !insertmacro RunPhase "engine"
-  StrCmp $1 "0" +3 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Engine setup failed (code $1). Check your internet connection and run Setup again.$\r$\nManual: github.com/burskozbekov/colourMatik"
-    Abort
-
-  ; --- stage 5: Premiere panel -------------------------------------------------
-  DetailPrint "[85%] Installing the Premiere panel..."
+  ; --- stage 4: Premiere panel (quick + reliable — BEFORE the big download, so a
+  ;     flaky connection on the engine stage never leaves the user with no panel) -
+  DetailPrint "[30%] Installing the Premiere panel..."
   !insertmacro RunPhase "panel"
   StrCmp $1 "0" +2 0
     DetailPrint "      WARNING: panel install returned code $1 (you can re-run windows\install-panel.ps1 later)."
 
-  ; --- stage 6: native effect ---------------------------------------------------
-  DetailPrint "[92%] Installing the colourMatik effect..."
+  ; --- stage 5: native effect ---------------------------------------------------
+  DetailPrint "[38%] Installing the colourMatik effect..."
   !insertmacro RunPhase "effect"
   StrCmp $1 "0" +2 0
     DetailPrint "      WARNING: effect install returned code $1 (you can re-run windows\install-effect.ps1 later)."
+
+  ; --- stage 6: engine + AI (the long one) — a failure here NO LONGER aborts;
+  ;     the panel + effect are already installed, so the user can finish later ----
+  DetailPrint "[45%] Setting up the engine + AI. This is the long stage:"
+  DetailPrint "      the AI download is a few GB (10-20 minutes). The log below keeps streaming."
+  !insertmacro RunPhase "engine"
+  StrCmp $1 "0" +2 0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "The engine/AI download didn't finish (code $1). The Premiere panel and effect ARE installed. Re-run Setup on a stable connection to finish the engine.$\r$\nManual: github.com/burskozbekov/colourMatik"
 
   ; --- stage 7: engine autostart -------------------------------------------------
   DetailPrint "[97%] Starting the engine + enabling autostart..."

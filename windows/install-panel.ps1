@@ -5,21 +5,42 @@
 # UXP registry.  by Sevki Bugra Ozbek - catheadai.com
 $ErrorActionPreference = "Stop"
 
+# --- resolve the LOGGED-IN user's profile, even when run elevated -------------
+# The Premiere setup self-elevates. When it is elevated with a DIFFERENT admin
+# account, $env:APPDATA points at the admin's profile, not the person using
+# Premiere — the panel would register where their Premiere never looks. Find the
+# owner of the interactive explorer.exe instead (the effect installer does the
+# same). When run non-elevated (the standalone repair) this resolves to the same
+# user, so both paths are correct.
+$UserProfile = $env:USERPROFILE
+try {
+    $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
+    if ($ex) {
+        $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
+        if ($owner.User) {
+            $p = Join-Path (Join-Path $env:SystemDrive "Users") $owner.User
+            if (Test-Path $p) { $UserProfile = $p }
+        }
+    }
+} catch {}
+$Roaming = Join-Path $UserProfile "AppData\Roaming"
+
 # --- find the panel source (next to this script, or the default install dir) --
 # $MyInvocation.MyCommand.Path is $null when this is run via Invoke-Expression
-# (the one-line repair), so guard it and always try %USERPROFILE%\colourMatik too.
+# (the one-line repair), so guard it and always try <profile>\colourMatik too.
 $ScriptPath = $MyInvocation.MyCommand.Path
 $Src = $null
 $cands = @()
 if ($ScriptPath) { $cands += (Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptPath)) "colourmatik-uxp") }
+$cands += (Join-Path $UserProfile "colourMatik\colourmatik-uxp")
 $cands += (Join-Path $env:USERPROFILE "colourMatik\colourmatik-uxp")
 foreach ($cand in $cands) {
     if ($cand -and (Test-Path (Join-Path $cand "manifest.json"))) { $Src = $cand; break }
 }
 
-$Ext  = Join-Path $env:APPDATA "Adobe\UXP\Plugins\External"
+$Ext  = Join-Path $Roaming "Adobe\UXP\Plugins\External"
 $Dest = Join-Path $Ext "com.colourmatik.panel_1.0.0"
-$Reg  = Join-Path $env:APPDATA "Adobe\UXP\PluginsInfo\v1\premierepro.json"
+$Reg  = Join-Path $Roaming "Adobe\UXP\PluginsInfo\v1\premierepro.json"
 
 # --- copy the panel files -----------------------------------------------------
 if ($Src) {

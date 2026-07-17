@@ -99,9 +99,13 @@ switch ($Phase) {
     "all" {
         Phase-Prereqs
         Phase-Code
-        Phase-Engine
-        Phase-Panel
+        # Install the quick, reliable UI parts (panel + effect) BEFORE the slow,
+        # network-heavy engine/AI download, and never let a failure in one stop the
+        # rest — a flaky connection during the multi-GB model download must not
+        # leave the user with no panel.
+        try { Phase-Panel }  catch { Write-Warning "Panel install issue ($_) - re-run windows\install-panel.ps1." }
         Phase-Effect
+        try { Phase-Engine } catch { Write-Warning "Engine/AI setup didn't finish ($_). The panel + effect ARE installed; re-run Setup to finish the engine download." }
         Phase-Autostart
         Write-Host ""
         Write-Host "==> All done!"
