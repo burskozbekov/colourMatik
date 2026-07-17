@@ -15,20 +15,12 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stddef.h>   // ptrdiff_t (signed row-stride arithmetic)
-
-// Premiere renders on several threads at once. We publish 'loaded' with a
-// release/acquire barrier so a reader never samples a half-written LUT — but we
-// deliberately DO NOT hold a mutex across the load. Premiere cancels superseded
-// render threads mid-flight; a thread killed while holding a lock left the lock
-// owned-by-a-dead-thread, which os_unfair_lock turns into a whole-process abort
-// (that was the crash). Lock-free load can't do that: concurrent loaders of the
-// same slot write identical bytes, and readers are gated on the release store.
+// Thread-local storage keyword. Each render thread owns its LUT (see the
+// per-thread cache below), so there is no shared state and no lock to orphan.
 #ifdef AE_OS_WIN
-#define CM_STORE_RELEASE(p, v) InterlockedExchange((volatile LONG *)(p), (LONG)(v))
-#define CM_LOAD_ACQUIRE(p)     InterlockedCompareExchange((volatile LONG *)(p), 0, 0)
+#define CM_TLS __declspec(thread)
 #else
-#define CM_STORE_RELEASE(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)
-#define CM_LOAD_ACQUIRE(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#define CM_TLS __thread
 #endif
 
 // ------------------------------------------------------------ LUT helpers
@@ -44,8 +36,9 @@ static void cm_lut_path(A_long slot, char *out, size_t n) {
 #endif
 }
 
-// Load a .cube (RED varies fastest, edge size 2..CM_LUT_MAX) into seq->lut.
-static int cm_load_lut(A_long slot, ColourMatikSeq *seq) {
+// Load a .cube (RED varies fastest, edge size 2..CM_LUT_MAX) into 'lut', a caller
+// buffer of CM_LUT_N3MAX*3 floats. Returns 1 and sets *out_size on success.
+static int cm_load_lut_buf(A_long slot, float *lut, int *out_size) {
 	char path[1024];
 	cm_lut_path(slot, path, sizeof(path));
 	FILE *f = fopen(path, "r");
@@ -63,17 +56,74 @@ static int cm_load_lut(A_long slot, ColourMatikSeq *seq) {
 			// node would smear NaN across every interpolated pixel. Reject the file.
 			if (!isfinite(r) || !isfinite(g) || !isfinite(b)) { fclose(f); return 0; }
 			if (count < CM_LUT_N3MAX) {
-				seq->lut[count * 3 + 0] = r;
-				seq->lut[count * 3 + 1] = g;
-				seq->lut[count * 3 + 2] = b;
+				lut[count * 3 + 0] = r;
+				lut[count * 3 + 1] = g;
+				lut[count * 3 + 2] = b;
 			}
 			count++;
 		}
 	}
 	fclose(f);
 	if (size < 2 || size > CM_LUT_MAX || count < size * size * size) return 0;
-	seq->size = size;
+	*out_size = size;
 	return 1;
+}
+
+// ---- Per-thread LUT cache (MFR-safe, lock-free) ----------------------------
+// After Effects Multi-Frame Rendering runs Render on WORKER THREADS where
+// in_data->sequence_data is NULL — so per-instance sequence data can't carry the
+// LUT (that made the AE effect render identity: it read a NULL handle and fell
+// through to passthrough). Each render THREAD instead keeps its own LUT in
+// thread-local storage, so nothing is shared and there is NO lock. That matters
+// because Premiere force-terminates superseded render threads mid-flight: a
+// thread killed here just drops its own TLS — there is no global lock to orphan
+// (the old os_unfair_lock whole-process abort / a plain-mutex permanent deadlock)
+// and no shared entry to poison. The engine writes each match to a fresh
+// monotonic slot and the .cube is immutable, so a thread reloads only when it
+// meets a slot it isn't already holding. Buffers (~3 MB each) are allocated
+// lazily — a thread that only ever sees one slot keeps exactly one — and live
+// for the thread's life, like any cache. The host's render pool is bounded
+// (~CPU cores), so total use stays bounded too.
+// A few slots per thread, not one: a comp can stack several graded layers, and a
+// worker thread renders them all for a frame. With a single buffer those layers
+// would fight over it and re-parse the whole 3 MB .cube on every render call.
+#define CM_TLS_SLOTS 4
+typedef struct {
+	A_long  slot;   // slot held in 'lut' — only meaningful while ok
+	int     size;   // LUT edge length (e.g. 65)
+	int     ok;     // 1 = 'lut' holds a valid LUT for 'slot'
+	float  *lut;    // malloc'd CM_LUT_N3MAX*3 floats on first use; reused after
+} CMTlsLut;
+static CM_TLS CMTlsLut g_tls[CM_TLS_SLOTS];   // zero-init: ok=0, lut=NULL
+static CM_TLS int      g_tls_victim = 0;      // round-robin when all entries are live
+
+// Hand back a read-only LUT for 'slot'. Returns 1 and sets *out_lut / *out_size
+// when a valid LUT is available; 0 -> caller renders identity.
+static int cm_get_lut(A_long slot, const float **out_lut, int *out_size) {
+	// Already loaded on this thread? (keyed on ok AND slot, so a failed load of
+	// some other slot can never make a good one look stale)
+	for (int i = 0; i < CM_TLS_SLOTS; i++) {
+		if (g_tls[i].ok && g_tls[i].slot == slot) {
+			*out_lut = g_tls[i].lut; *out_size = g_tls[i].size; return 1;
+		}
+	}
+	// Take a free entry if there is one, else evict round-robin. Eviction is safe:
+	// the buffer belongs to this thread alone and no other thread can be reading it.
+	CMTlsLut *e = NULL;
+	for (int i = 0; i < CM_TLS_SLOTS; i++) if (!g_tls[i].ok) { e = &g_tls[i]; break; }
+	if (!e) { e = &g_tls[g_tls_victim]; g_tls_victim = (g_tls_victim + 1) % CM_TLS_SLOTS; }
+
+	if (!e->lut) e->lut = (float *)malloc(sizeof(float) * (size_t)CM_LUT_N3MAX * 3);
+	int sz = 0;
+	e->ok   = (e->lut != NULL) && cm_load_lut_buf(slot, e->lut, &sz);
+	e->size = e->ok ? sz : 0;
+	// Claim the slot ONLY on success: a failed load (a .cube still syncing in from
+	// Dropbox/iCloud, briefly held by an AV scanner, or arriving a moment after the
+	// panel set the param) leaves the entry free, so the next render retries and a
+	// transient failure never pins the slot to identity for the session.
+	e->slot = e->ok ? slot : -1;
+	if (e->ok) { *out_lut = e->lut; *out_size = e->size; return 1; }
+	return 0;
 }
 
 static inline float cm_clampf(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
@@ -110,7 +160,7 @@ static void cm_sample(const float *lut, int S, float r, float g, float b, float 
 	}
 }
 
-typedef struct { ColourMatikSeq *seq; float t; } CM_Info;
+typedef struct { const float *lut; int size; float t; } CM_Info;
 
 // Diagnostic trace -> /tmp/colourmatik_fx.log (or %TEMP% on Windows), capped.
 // DORMANT unless the COLOURMATIK_TRACE env var is set, so shipping builds are
@@ -150,7 +200,7 @@ static PF_Err cm_pixel(void *refcon, A_long x, A_long y, PF_Pixel *inP, PF_Pixel
 	float g = cm_clampf(inP->green / 255.f + d);
 	float b = cm_clampf(inP->blue / 255.f + d);
 	float o[3];
-	cm_sample(info->seq->lut, info->seq->size, r, g, b, o);
+	cm_sample(info->lut, info->size, r, g, b, o);
 	float t = info->t;
 	outP->alpha = inP->alpha;
 	outP->red   = (A_u_char)(cm_clampf(r + t * (o[0] - r)) * 255.f + 0.5f);
@@ -184,8 +234,8 @@ static int cm_aborted(PF_InData *in_data, A_long y) {
 
 static PF_Err cm_render_bgra_32f(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
                                  A_long width, A_long height, CM_Info *info) {
-	const float *lut = info->seq->lut;
-	const int S = (int)info->seq->size;
+	const float *lut = info->lut;
+	const int S = info->size;
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
 		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
@@ -209,8 +259,8 @@ static PF_Err cm_render_bgra_32f(PF_InData *in_data, PF_EffectWorld *src, PF_Eff
 
 static PF_Err cm_render_bgra_8u(PF_InData *in_data, PF_EffectWorld *src, PF_EffectWorld *dst,
                                 A_long width, A_long height, CM_Info *info) {
-	const float *lut = info->seq->lut;
-	const int S = (int)info->seq->size;
+	const float *lut = info->lut;
+	const int S = info->size;
 	const float t = info->t;
 	for (A_long y = 0; y < height; y++) {
 		if (cm_aborted(in_data, y)) return PF_Interrupt_CANCEL;
@@ -254,12 +304,13 @@ static PF_Err About(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *param
 static PF_Err GlobalSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
 	out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
 	out_data->out_flags |= PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
-	// Multi-Frame Rendering: AE renders many frames on parallel threads. Our LUT is
-	// read-only after a lock-free load, and SequenceResetup always reallocs + the
-	// LUT reloads from its .cube on the next render — so a flattened/garbage
-	// sequence-data pointer is safe across threads/processes. Declaring this stops
-	// AE's "not optimized for Multi-Frame Rendering" warning. We do NOT set
-	// SEQUENCE_DATA_NEEDS_FLATTENING, so GET_FLATTENED_SEQUENCE_DATA isn't required.
+	// Multi-Frame Rendering: AE renders many frames on parallel worker threads. We
+	// keep NO sequence data — the LUT lives in a per-thread, lock-free cache (see
+	// cm_get_lut), each thread loading its own copy from the immutable slot_<N>.cube.
+	// There is no shared mutable state across threads, so declaring MFR support is
+	// safe and silences AE's "not optimized for Multi-Frame Rendering" warning. We
+	// hold no sequence data, so SEQUENCE_DATA_NEEDS_FLATTENING / flattening callbacks
+	// are irrelevant.
 	out_data->out_flags2 |= PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
 
 	// Premiere: declare high-precision pixel formats (float preferred, 8-bit fallback).
@@ -292,39 +343,25 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	return PF_Err_NONE;
 }
 
+// The LUT no longer lives in sequence data (it's in the per-thread cache), so
+// these are minimal: we keep NO per-instance sequence data at all. Disposing any
+// handle a saved project restored also sidesteps the old load-time crash where a
+// flattened struct carried a garbage 'lut' pointer from another build.
 static PF_Err SequenceSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
-	if (out_data->sequence_data) PF_DISPOSE_HANDLE(out_data->sequence_data);
-	out_data->sequence_data = PF_NEW_HANDLE(sizeof(ColourMatikSeq));
-	if (!out_data->sequence_data) return PF_Err_INTERNAL_STRUCT_DAMAGED;
-	ColourMatikSeq *seq = *(ColourMatikSeq **)out_data->sequence_data;
-	seq->slot = -1;
-	seq->loaded = 0;
-	seq->size = 0;
-	// The big LUT lives here, off the flattened struct. Allocated once, single-
-	// threaded, so renders never race an allocation. NULL on failure -> identity.
-	seq->lut = (float *)malloc(sizeof(float) * (size_t)CM_LUT_N3MAX * 3);
+	out_data->sequence_data = NULL;
 	return PF_Err_NONE;
 }
 
 static PF_Err SequenceSetdown(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
-	if (in_data->sequence_data) {
-		ColourMatikSeq *seq = *(ColourMatikSeq **)in_data->sequence_data;
-		if (seq && seq->lut) { free(seq->lut); seq->lut = NULL; }
-		PF_DISPOSE_HANDLE(in_data->sequence_data);
-		out_data->sequence_data = NULL;
-	}
+	if (in_data->sequence_data) PF_DISPOSE_HANDLE(in_data->sequence_data);
+	out_data->sequence_data = NULL;
 	return PF_Err_NONE;
 }
 
 static PF_Err SequenceResetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
-	// ALWAYS start fresh. A restored (flattened) struct has a garbage 'lut'
-	// pointer and possibly a stale size from another build; dereferencing or
-	// reusing it is the load-time crash. Discard it and allocate a correct,
-	// freshly-sized struct + LUT. We lose nothing: the slot comes from a param
-	// and the LUT reloads from its .cube file on the next render.
 	if (in_data->sequence_data) PF_DISPOSE_HANDLE(in_data->sequence_data);
 	out_data->sequence_data = NULL;
-	return SequenceSetup(in_data, out_data, params, output);
+	return PF_Err_NONE;
 }
 
 static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *params[], PF_LayerDef *output) {
@@ -335,30 +372,22 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	PF_EffectWorld *inputW = &params[CM_INPUT]->u.ld;
 	int identity = 0;
 
-	// Premiere's render process may populate only in_data->sequence_data.
-	PF_Handle seqH = in_data->sequence_data ? in_data->sequence_data
-	                                        : out_data->sequence_data;
-	ColourMatikSeq *seq = NULL;
-	if (seqH && *(void **)seqH && (seq = *(ColourMatikSeq **)seqH) != NULL && seq->lut) {
-		// seq->lut is a real buffer allocated THIS session (SequenceSetup/Resetup).
-		// Lock-free load, SLOT-TAGGED: 'loaded' holds slot+1 when lut is valid for
-		// that slot (0 = nothing). Tagging closes the race where a thread finishing
-		// a load of the OLD slot re-marked it valid after a slot change — its stale
-		// tag simply won't match, so the next render reloads. Concurrent loaders of
-		// the same slot write identical bytes; readers are gated on the tag.
-		const A_long want = slot + 1;
-		if (CM_LOAD_ACQUIRE(&seq->loaded) != want) {
-			int ok = cm_load_lut(slot, seq);       // fills seq->lut and seq->size
-			seq->slot = slot;                      // informational (trace)
-			CM_STORE_RELEASE(&seq->loaded, ok ? want : 0);
-		}
-		if (CM_LOAD_ACQUIRE(&seq->loaded) != want || seq->size < 2 || intensity == 0.f)
-			identity = 1;
-	} else {
-		identity = 1;   // no sequence data / no LUT buffer -> passthrough
-	}
+	// The LUT comes from a process-global, slot-keyed cache — NOT sequence data.
+	// Under After Effects Multi-Frame Rendering, Render runs on worker threads
+	// where in_data->sequence_data is NULL, so any LUT stashed there is invisible
+	// (that was the "renders identity in AE" bug). The cache is visible from every
+	// thread and process, so both Premiere and AE (MFR or not) get the real LUT.
+	const float *lut = NULL;
+	int lut_size = 0;
+	// At zero intensity the render is identity whatever the LUT says, so don't even
+	// look it up — a dialled-out instance never pays for a .cube parse.
+	int have = (intensity != 0.f) && cm_get_lut(slot, &lut, &lut_size);
+	if (!have || lut_size < 2)
+		identity = 1;
+	cm_trace("Render enter appl=0x%x slot=%ld have=%d size=%d identity=%d",
+	         (unsigned)in_data->appl_id, (long)slot, have, lut_size, identity);
 
-	CM_Info info; info.seq = seq; info.t = intensity;
+	CM_Info info; info.lut = lut; info.size = lut_size; info.t = intensity;
 
 	// ---------------- Premiere Pro: BGRA float / 8-bit paths ----------------
 	// Gate on appl_id ALONE. During load-time / thumbnail renders pica_basicP can
@@ -400,10 +429,10 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 			if (irb > 0) w = MIN(w, (A_long)(irb / (A_long)bpp));
 			if (orb > 0) w = MIN(w, (A_long)(orb / (A_long)bpp));
 		}
-		cm_trace("render fmt=%d in=%ldx%ld rb=%ld %p out=%ldx%ld rb=%ld %p slot=%ld loaded=%ld t=%.2f",
+		cm_trace("render fmt=%d in=%ldx%ld rb=%ld %p out=%ldx%ld rb=%ld %p slot=%ld size=%d id=%d t=%.2f",
 		         (int)fmt, (long)inputW->width, (long)inputW->height, (long)inputW->rowbytes,
 		         inputW->data, (long)output->width, (long)output->height, (long)output->rowbytes,
-		         output->data, (long)slot, (long)(seq ? seq->loaded : -1), intensity);
+		         output->data, (long)slot, lut_size, identity, intensity);
 		if (!inputW->data || !output->data || w <= 0 || h <= 0) {
 			cm_trace("  -> skipped (empty/null world)");
 			return PF_Err_NONE;
@@ -438,6 +467,9 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 			return PF_Err_NONE;
 		}
 	}
+	cm_trace("AE render appl=0x%x slot=%ld size=%d identity=%d in=%ldx%ld",
+	         (unsigned)in_data->appl_id, (long)slot, lut_size, identity,
+	         (long)inputW->width, (long)inputW->height);
 	if (identity) {
 		return PF_COPY(inputW, output, NULL, NULL);
 	}
@@ -451,6 +483,7 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 
 	A_long hh = in_data->extent_hint.bottom - in_data->extent_hint.top;
 	ERR(PF_ITERATE(0, hh, inputW, &in_data->extent_hint, (void *)&info, cm_pixel, output));
+	cm_trace("AE PF_ITERATE done err=%d", (int)err);
 	return err;
 }
 

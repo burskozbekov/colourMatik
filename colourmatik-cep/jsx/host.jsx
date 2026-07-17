@@ -130,10 +130,16 @@ function cm_layerImagePath(L) {
     var png = new File(dir.fsName + "/cmk_" + (new Date()).getTime() + ".png");
     try {
         target.saveFrameToPng(0, png);
-        // saveFrameToPng writes on disk but leaves File.exists stale; confirm by
-        // actually opening the file for reading (or trust no-throw as a last resort).
-        if (cm_fileReadable(png.fsName)) return png.fsName;
-        return png.fsName; // written but a cached listing hid it — the engine will read it
+        // saveFrameToPng QUEUES the render — the file lands on disk a moment later.
+        // Posting to the engine before it exists yields "file not found", so WAIT
+        // (up to ~15 s for heavy comps) until the file is actually readable.
+        var w;
+        for (w = 0; w < 150; w++) {
+            if (cm_fileReadable(png.fsName)) return png.fsName;
+            $.sleep(100);
+        }
+        _cmDiag += "png-render-timeout ";
+        return null;
     } catch (e4) { _cmDiag += "render error: " + e4.toString() + " "; return null; }
 }
 function cm_layerByIndex(comp, idx) {

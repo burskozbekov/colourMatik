@@ -66,18 +66,10 @@ enum { CM_INTENSITY_DISK_ID = 1, CM_SLOT_DISK_ID = 2 };
 #define CM_LUT_MAX   65      // largest .cube edge we accept (engine writes 65^3)
 #define CM_LUT_N3MAX (CM_LUT_MAX * CM_LUT_MAX * CM_LUT_MAX)
 
-// Per-instance sequence data. The LUT lives in a SEPARATELY allocated buffer
-// (pointer, not inline): the struct that Premiere flattens into the .prproj is
-// then tiny and version-stable, so a project saved by another build can never
-// hand us a too-small buffer to overflow (that was the load-time crash). The
-// lut pointer is meaningless across sessions — SequenceResetup always allocates
-// a fresh one, so a restored (garbage) pointer is never dereferenced.
-typedef struct {
-	A_long   slot;      // slot currently loaded (-1 = none/identity)
-	A_long   loaded;    // 1 if lut holds a valid LUT for 'slot'
-	A_long   size;      // LUT edge length actually loaded (e.g. 33 or 65)
-	float   *lut;       // heap buffer of CM_LUT_N3MAX*3 floats (NULL if alloc failed)
-} ColourMatikSeq;
+// The LUT is NOT stored in sequence data. After Effects Multi-Frame Rendering
+// nulls in_data->sequence_data on worker threads, so the effect keeps the LUT in
+// a per-thread, lock-free cache instead (see cm_get_lut in colourMatik.cpp). The
+// slot number persists in the CM_SLOT param; the LUT reloads from slot_<N>.cube.
 
 extern "C" {
 	DllExport PF_Err EffectMain(
