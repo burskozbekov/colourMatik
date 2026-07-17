@@ -169,10 +169,20 @@ def extract_frames(video: str | Path, n: int = 3,
 
 def load_any(path: str | Path, t: float | None = None, frames: int = 1,
              start: float | None = None, end: float | None = None) -> np.ndarray:
-    """Load an image, or extract frame(s) from a video, into encoded float RGB."""
-    ext = Path(path).suffix.lower()
-    if ext in VIDEO_EXTS:
+    """Load an image, or extract frame(s) from a video, into encoded float RGB.
+
+    Routed by CAPABILITY, not by extension allowlist: only known still-image
+    extensions go to the image reader; everything else is treated as video first
+    (ffmpeg decodes far more formats than any list we could maintain — .webm,
+    .mpg, .m2ts, .3gp, ProRes in odd containers...). If ffmpeg can't open it,
+    fall back to the image reader before giving up, so a mislabelled still
+    (say a .heic) still has a chance.
+    """
+    if Path(path).suffix.lower() in IMAGE_EXTS:
+        return load_image(path)
+    try:
         if t is not None:
             return extract_frame(path, t)
         return extract_frames(path, frames, start=start, end=end)
-    return load_image(path)
+    except Exception:
+        return load_image(path)

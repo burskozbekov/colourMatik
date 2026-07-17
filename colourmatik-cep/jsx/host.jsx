@@ -124,28 +124,69 @@ function cm_layerImagePath(L) {
     // folder, which the engine reads freely.
     var dir = new Folder(Folder.userData.fsName + "/colourMatik/aeframes");
     try { if (!dir.exists) dir.create(); } catch (eD) {}
-    if (!dir.exists) { dir = Folder.temp; }   // last-resort fallback
-    // prune old frames so the folder doesn't grow unbounded
-    try { var old = dir.getFiles("cmk_*.png"), oi; if (old) for (oi = 0; oi < old.length; oi++) { try { old[oi].remove(); } catch (eR) {} } } catch (eP) {}
+    // No Folder.temp fallback: the engine cannot read TemporaryItems (TCC), so a
+    // frame written there is guaranteed to fail later with a confusing error.
+    if (!dir.exists) { _cmDiag += "cannot create colourMatik/aeframes "; return null; }
+    // Prune old frames so the folder doesn't grow unbounded — but ONLY old ones.
+    // The reference and the target both live here between captures; deleting
+    // everything on each capture destroyed the previously captured frame and made
+    // precomp-to-precomp matching always fail with "file not found".
+    try {
+        var old = dir.getFiles("cmk_*.png"), oi, now = (new Date()).getTime();
+        if (old) for (oi = 0; oi < old.length; oi++) {
+            try { if (now - old[oi].modified.getTime() > 2 * 3600 * 1000) old[oi].remove(); } catch (eR) {}
+        }
+    } catch (eP) {}
     var png = new File(dir.fsName + "/cmk_" + (new Date()).getTime() + ".png");
     try {
-        target.saveFrameToPng(0, png);
+        // Render at the comp's CURRENT time (mapped into the precomp), not frame 0 —
+        // frame 0 is often a slate/empty/green-screen frame that has nothing to do
+        // with what the user is looking at, and matching on it gives absurd results.
+        var t = 0;
+        try {
+            var host = cm_activeComp();
+            if (host) { t = host.time; if (target !== host) t = host.time - L.startTime; }
+        } catch (eT) { t = 0; }
+        try {
+            var maxT = target.duration - target.frameDuration;
+            if (t > maxT) t = maxT;
+            if (t < 0) t = 0;
+        } catch (eC) { t = 0; }
+        target.saveFrameToPng(t, png);
         // saveFrameToPng QUEUES the render — the file lands on disk a moment later.
-        // Posting to the engine before it exists yields "file not found", so WAIT
-        // (up to ~15 s for heavy comps) until the file is actually readable.
-        var w;
+        // Wait until the file is readable AND its size has stopped growing (two
+        // consecutive equal non-zero lengths), so the engine never reads a
+        // half-written PNG.
+        var w, lastLen = -1;
         for (w = 0; w < 150; w++) {
-            if (cm_fileReadable(png.fsName)) return png.fsName;
+            var pf = new File(png.fsName); pf.encoding = "BINARY";
+            if (pf.open("r")) {
+                var len = pf.length; pf.close();
+                if (len > 0 && len === lastLen) return png.fsName;
+                lastLen = len;
+            }
             $.sleep(100);
         }
         _cmDiag += "png-render-timeout ";
         return null;
     } catch (e4) { _cmDiag += "render error: " + e4.toString() + " "; return null; }
 }
-function cm_layerByIndex(comp, idx) {
+/* Resolve the target layer by index, VERIFIED by name. AE layer indices shift on
+ * every reorder/delete — blindly trusting a stale index applies the effect to an
+ * unrelated layer. If the name no longer matches, find the layer by its (unique)
+ * name; if it's ambiguous or gone, return null so the caller errors loudly
+ * instead of silently grading the wrong layer. */
+function cm_layerByIndex(comp, idx, name) {
     idx = Number(idx);
-    if (idx && idx >= 1 && idx <= comp.numLayers) { try { return comp.layer(idx); } catch (e) {} }
-    return cm_selLayer(comp);
+    var L = null;
+    if (idx && idx >= 1 && idx <= comp.numLayers) { try { L = comp.layer(idx); } catch (e) {} }
+    if (!name) return L || cm_selLayer(comp);   // legacy path: no identity available
+    if (L && L.name === name) return L;
+    var k, cand = null, n = 0;
+    for (k = 1; k <= comp.numLayers; k++) {
+        try { if (comp.layer(k).name === name) { cand = comp.layer(k); n++; } } catch (e2) {}
+    }
+    return (n === 1) ? cand : null;
 }
 function cm_findEffect(L) {
     var par = L.property("ADBE Effect Parade"), i, p;
@@ -173,18 +214,38 @@ function cm_getSelectedSourcePath() {
         var L = cm_selLayer(comp);  if (!L)   return cm_res(false, "Select a layer in the timeline.");
         var path = cm_layerImagePath(L);
         if (!path) return cm_res(false, "Couldn't read '" + L.name + "'. " + _cmDiag);
-        return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index);
+        // compId pins the apply to THIS comp — cm_apply must not guess from whatever
+        // viewer happens to be active minutes later when the match finishes.
+        return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index + ',"compId":' + comp.id);
     } catch (e) { return cm_res(false, "Error: " + e.toString()); }
+}
+
+/* Establish context on the comp captured at match time (by id); fall back to the
+ * old guess only if that comp no longer exists. */
+function cm_compForApply(compId) {
+    var comp = null;
+    try {
+        var it = app.project.itemByID(Number(compId));
+        if (it && (it instanceof CompItem)) comp = it;
+    } catch (e) {}
+    if (comp) {
+        try { var vw = comp.openInViewer(); if (vw) vw.setActive(); } catch (e2) {}
+        try { $.global.cmLastCompId = comp.id; } catch (e3) {}
+        return comp;
+    }
+    return cm_context();
 }
 
 /* (B) apply/ensure the effect on the TARGET layer (by remembered index) + set both params.
  * cm_context() (openInViewer) MUST run BEFORE beginUndoGroup — beginUndoGroup itself
  * needs a valid current context, so establishing it first is the fix. */
-function cm_apply(slot, intensity, layerIndex) {
-    var comp = cm_context(); if (!comp) return cm_res(false, "Open a composition first.");
+function cm_apply(slot, intensity, layerIndex, compId, layerName) {
+    var comp = compId ? cm_compForApply(compId) : cm_context();
+    if (!comp) return cm_res(false, "Open a composition first.");
     app.beginUndoGroup("colourMatik: Match & Apply");
     try {
-        var L = cm_layerByIndex(comp, layerIndex); if (!L) return cm_res(false, "Select the TARGET footage layer in the timeline.");
+        var L = cm_layerByIndex(comp, layerIndex, layerName);
+        if (!L) return cm_res(false, "The TARGET layer" + (layerName ? " '" + layerName + "'" : "") + " is no longer in '" + comp.name + "' — re-select it and match again.");
         var par = L.property("ADBE Effect Parade"); if (!par) return cm_res(false, "This layer cannot hold effects.");
         var fx = cm_findEffect(L);
         if (!fx) {
@@ -216,11 +277,12 @@ function cm_apply(slot, intensity, layerIndex) {
 }
 
 /* (C) live intensity — re-set only the Intensity param on the TARGET layer's effect */
-function cm_setIntensity(v, layerIndex) {
-    var comp = cm_context(); if (!comp) return cm_res(false, "No comp — open a composition first.");
+function cm_setIntensity(v, layerIndex, compId, layerName) {
+    var comp = compId ? cm_compForApply(compId) : cm_context();
+    if (!comp) return cm_res(false, "No comp — open a composition first.");
     app.beginUndoGroup("colourMatik: Intensity");
     try {
-        var L = cm_layerByIndex(comp, layerIndex); if (!L) return cm_res(false, "No layer.");
+        var L = cm_layerByIndex(comp, layerIndex, layerName); if (!L) return cm_res(false, "No layer.");
         var fx = cm_findEffect(L); if (!fx) return cm_res(false, "No colourMatik effect on the layer.");
         var pInt = fx.property("Intensity");
         if (pInt && pInt.numKeys === 0) pInt.setValue(Number(v));

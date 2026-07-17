@@ -127,9 +127,29 @@ def _next_slot() -> int:
             n = int(_SLOT_COUNTER.read_text().strip())
         except Exception:
             n = 0
+        # Never fall behind the slot files on disk: if the counter file was lost
+        # (partial uninstall, restored backup) but slot_*.cube files survive, a
+        # counter restart would REUSE slot numbers that open projects still point
+        # at — the native effect caches a slot's LUT for the whole app session, so
+        # a reused number silently serves the older look. Deriving from the files
+        # keeps every number fresh.
+        try:
+            n = max(n, max((int(p.stem.split("_")[1]) for p in _SLOT_DIR.glob("slot_*.cube")),
+                           default=0))
+        except Exception:
+            pass
         n = n % 99999 + 1  # cycle 1..99999; never 0 (0 = effect's "no LUT" default)
         try:
             _SLOT_COUNTER.write_text(str(n))
+        except Exception:
+            pass
+        # Garbage-collect: each .cube is ~7 MB and they accumulated forever. Keep a
+        # generous 200 newest (any look an open project could realistically still
+        # reference this season) and drop the rest.
+        try:
+            cubes = sorted(_SLOT_DIR.glob("slot_*.cube"), key=lambda p: p.stat().st_mtime)
+            for p in cubes[:-200]:
+                p.unlink(missing_ok=True)
         except Exception:
             pass
         return n
@@ -209,7 +229,9 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
     # Images are never stacked, so they must not be sliced (a PNG target would
     # otherwise preview as its top 1/f strip).
     def _first_frame(arr, path):
-        if f > 1 and Path(path).suffix.lower() in cmio.VIDEO_EXTS:
+        # Mirror load_any's routing: anything that is not a known STILL extension
+        # was decoded as video and arrives as f frames stacked vertically.
+        if f > 1 and Path(path).suffix.lower() not in cmio.IMAGE_EXTS:
             h = arr.shape[0] // f
             if h > 0:
                 return arr[:h]

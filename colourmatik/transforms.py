@@ -82,6 +82,16 @@ def fit_mkl(src_lin: np.ndarray, tgt_lin: np.ndarray):
     Ss_ihalf = _sqrtm_sym(Ss, inverse=True)
     mid = _sqrtm_sym(Ss_half @ St @ Ss_half)
     T = Ss_ihalf @ mid @ Ss_ihalf
+    # Bound the transfer's gain. When the source has almost no variance along some
+    # axis (a green screen, a flat wall, a single-colour frame), Sigma_s^-1/2 blows
+    # up along it and T reaches gains of 40x+ — every pixel is catapulted out of
+    # gamut and the baked LUT clamps to the cube corners (the observed all-magenta
+    # slot). Real grades measure around 1.2x per axis; 4x is already an extreme
+    # look, so cap T's eigenvalues there. The mean shift (mu_s -> mu_t) is
+    # untouched, so a degenerate source still gets a sane, bounded look.
+    T = 0.5 * (T + T.T)
+    w, V = np.linalg.eigh(T)
+    T = (V * np.clip(w, 0.0, 4.0)) @ V.T
 
     def f(x: np.ndarray) -> np.ndarray:
         x = np.atleast_2d(x)

@@ -232,6 +232,13 @@ async function applyEffect(trackItem, slot, intensityPct) {
 let _runGen = 0;   // generation token: a newer run() invalidates an older one's cleanup
 async function run() {
   const gen = ++_runGen;
+  // Snapshot the target NOW. The match takes seconds to minutes and the user can
+  // re-capture meanwhile (the eyedropper stays live) — this run must apply to the
+  // clip it was started for, not whatever was captured last.
+  const tgt = {
+    srcPath: state.srcPath, refPath: state.refPath, trackItem: state.srcTrackItem,
+    srcIn: state.srcIn, srcOut: state.srcOut, refIn: state.refIn, refOut: state.refOut,
+  };
   $("run").disabled = true;
   $("preview").className = "hidden";
   state.slot = null;                 // mid-match intensity drags must no-op, not apply the old LUT
@@ -248,14 +255,18 @@ async function run() {
       res = await fetchT(SERVER + "/match_paths", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          source_path: state.srcPath, reference_path: state.refPath,
+          source_path: tgt.srcPath, reference_path: tgt.refPath,
           mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(),
-          source_in: state.srcIn ?? null, source_out: state.srcOut ?? null,
-          reference_in: state.refIn ?? null, reference_out: state.refOut ?? null,
+          source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
+          reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
           job_id: jobId,
         }),
       }, 300000);
     } catch (netErr) {
+      // Distinguish "we gave up waiting" from "nothing is listening" — the match may
+      // well still be running in the engine after our 5-minute client timeout.
+      if (netErr && netErr.name === "AbortError")
+        throw new Error("The match is taking longer than 5 minutes — the engine may still be working. Try again with shorter clips, or wait and re-run.");
       throw new Error("Can't reach the engine at " + SERVER + " — start it with ./colourmatik-app");
     }
     const j = await res.json().catch(() => ({ ok: false, error: "HTTP " + res.status }));
@@ -281,8 +292,11 @@ async function run() {
     } catch (e) {}
     if (gen !== _runGen) return;
     state.slot = ej.ok ? ej.slot : null;
-    // reveal Intensity only now that the slot is known, so the slider is never live-but-dead
-    if (state.slot != null && state.srcTrackItem) {
+    const slot = state.slot;
+    // reveal Intensity only now that the slot is known, so the slider is never
+    // live-but-dead — and only if the user hasn't re-targeted meanwhile (the
+    // slider drives state.srcTrackItem, which may no longer be this run's clip)
+    if (slot != null && tgt.trackItem && state.srcTrackItem === tgt.trackItem) {
       $("intensity-section").className = "section";
       $("intensity").value = DEFAULT_INTENSITY;
       $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
@@ -291,21 +305,26 @@ async function run() {
     const label = j.method_label || j.method;
     const mTxt = j.ai_used ? `${label} 🧠` : label;   // brain = local AI chose the match
     const deTxt = (j.de_after != null) ? `  ΔE00 ${Number(j.de_after).toFixed(2)}` : "";
-    if (!state.srcTrackItem) {
+    if (!tgt.trackItem) {
       setStatus("DONE", `Matched — ${mTxt}${deTxt}. Select the TARGET clip on the timeline and Match & Apply again to auto-apply.`, "done");
-    } else if (state.slot == null) {
+    } else if (slot == null) {
       setStatus("ERROR", "Match ok but the LUT slot couldn't be written — is the engine up to date?", "error");
     } else {
       try {
         // The UXP apply call can occasionally resolve late; never let it wedge the
         // panel — if it doesn't return in a few seconds, move on (the effect is
         // already added by then) so the button re-enables for the next clip.
+        // The .catch() keeps a post-timeout rejection from surfacing as unhandled.
+        const applying = applyEffect(tgt.trackItem, slot, DEFAULT_INTENSITY);
+        applying.catch(() => {});
         await Promise.race([
-          applyEffect(state.srcTrackItem, state.slot, DEFAULT_INTENSITY),
+          applying,
           new Promise((_, rej) => setTimeout(() => rej(new Error("apply-timeout")), 6000)),
         ]);
+        if (gen !== _runGen) return;   // a newer run owns the status line now
         setStatus("DONE", `Matched — ${mTxt}${deTxt}. colourMatik effect applied — drag Intensity to adjust (live).`, "done");
       } catch (e) {
+        if (gen !== _runGen) return;
         if (String(e.message) === "apply-timeout")
           setStatus("DONE", `Matched — ${mTxt}${deTxt}. colourMatik effect applied. Drag Intensity to adjust (live).`, "done");
         else

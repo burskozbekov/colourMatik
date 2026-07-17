@@ -23,7 +23,9 @@ var _Buffer = (typeof Buffer !== "undefined") ? Buffer : (typeof cep_node !== "u
 var _http = _req ? _req("http") : null;
 
 var $ = function (id) { return document.getElementById(id); };
-var state = { refPath: null, srcPath: null, srcLayerIndex: null, rid: null, slot: null };
+var state = { refPath: null, srcPath: null, srcLayerIndex: null, srcCompId: null, srcLayerName: null, rid: null, slot: null };
+/* single-quote a value for embedding inside an evalScript() source string */
+function jsArg(s) { return "'" + String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; }
 var bakeTimer = null;
 
 /* ---- transport: Node http (primary) or fetch (fallback) ------------------- */
@@ -128,6 +130,7 @@ function newJobId() { return Date.now().toString(36) + Math.random().toString(36
 
 /* ---- capture reference / target (the selected AE layer) ------------------- */
 async function captureRef() {
+  if (_running) return setStatus("MATCHING", "Wait for the current match to finish.", "busy");
   try {
     var s = await evalHost("cm_getSelectedSourcePath()");
     if (!s.ok) return setStatus("SELECT", s.message || "Select the reference layer, then click again.", "error");
@@ -139,11 +142,14 @@ async function captureRef() {
   } catch (e) { setStatus("ERROR", String(e.message || e), "error"); }
 }
 async function captureSrc() {
+  if (_running) return setStatus("MATCHING", "Wait for the current match to finish.", "busy");
   try {
     var s = await evalHost("cm_getSelectedSourcePath()");
     if (!s.ok) return setStatus("SELECT", s.message || "Select the target layer, then click again.", "error");
     state.srcPath = s.path;
     state.srcLayerIndex = s.layerIndex;
+    state.srcCompId = s.compId || null;
+    state.srcLayerName = s.layerName || null;
     state.slot = null;
     $("intensity-section").className = "section hidden";
     $("srcName").textContent = baseName(s.path);
@@ -155,8 +161,16 @@ async function captureSrc() {
 
 /* ---- Match & Apply -------------------------------------------------------- */
 var _runGen = 0;
+var _running = false;
 async function run() {
   var gen = ++_runGen;
+  _running = true;
+  // Snapshot the target NOW: the engine takes seconds to minutes, and the user can
+  // re-capture meanwhile — this match must land on the layer it was started for.
+  var tgt = {
+    srcPath: state.srcPath, refPath: state.refPath,
+    idx: state.srcLayerIndex, compId: state.srcCompId, name: state.srcLayerName
+  };
   $("run").disabled = true;
   $("preview").className = "hidden";
   state.slot = null;
@@ -169,7 +183,7 @@ async function run() {
     var j;
     try {
       j = await postJSON("/match_paths", {
-        source_path: state.srcPath, reference_path: state.refPath,
+        source_path: tgt.srcPath, reference_path: tgt.refPath,
         mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(), job_id: jobId
       }, 300000);
     } catch (netErr) { throw new Error(String(netErr.message || netErr)); }
@@ -199,7 +213,8 @@ async function run() {
     if (state.slot == null) {
       setStatus("ERROR", "Match ok but the LUT slot couldn't be written — is the engine up to date?", "error");
     } else {
-      var ap = await evalHost("cm_apply(" + parseInt(state.slot, 10) + ", " + DEFAULT_INTENSITY + ", " + (state.srcLayerIndex || 0) + ")");
+      var ap = await evalHost("cm_apply(" + parseInt(state.slot, 10) + ", " + DEFAULT_INTENSITY + ", " +
+        (tgt.idx || 0) + ", " + (tgt.compId || 0) + ", " + jsArg(tgt.name) + ")");
       if (gen !== _runGen) return;
       if (ap.ok) setStatus("DONE", "Matched — " + mTxt + deTxt + ". colourMatik applied — drag Intensity to adjust.", "done");
       else setStatus("ERROR", ap.message || "Apply failed.", "error");
@@ -207,6 +222,7 @@ async function run() {
   } catch (e) {
     if (gen === _runGen) setStatus("ERROR", String(e.message || e), "error");
   } finally {
+    _running = false;
     if (gen === _runGen) { if (!ok) stopProgress(false); refreshRun(); }
   }
 }
@@ -221,7 +237,8 @@ function onIntensity() {
 async function applyIntensity(v) {
   if (state.slot == null) return;
   try {
-    var r = await evalHost("cm_setIntensity(" + v + ", " + (state.srcLayerIndex || 0) + ")");
+    var r = await evalHost("cm_setIntensity(" + v + ", " + (state.srcLayerIndex || 0) + ", " +
+      (state.srcCompId || 0) + ", " + jsArg(state.srcLayerName) + ")");
     if (r.ok) setStatus("INTENSITY", v + "% — applied live on the layer.", "busy");
     else setStatus("INTENSITY", r.message || "intensity error", "error");
   } catch (e) { setStatus("INTENSITY", "intensity error: " + (e.message || e), "error"); }
