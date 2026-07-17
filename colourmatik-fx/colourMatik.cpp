@@ -80,10 +80,17 @@ static int cm_load_lut_buf(A_long slot, float *lut, int *out_size) {
 // (the old os_unfair_lock whole-process abort / a plain-mutex permanent deadlock)
 // and no shared entry to poison. The engine writes each match to a fresh
 // monotonic slot and the .cube is immutable, so a thread reloads only when it
-// meets a slot it isn't already holding. Buffers (~3 MB each) are allocated
-// lazily — a thread that only ever sees one slot keeps exactly one — and live
-// for the thread's life, like any cache. The host's render pool is bounded
-// (~CPU cores), so total use stays bounded too.
+// meets a slot it isn't already holding.
+//
+// Cost: buffers (~3 MB) are allocated lazily — a thread that only ever renders one
+// slot keeps exactly one, and a thread that never renders a real slot keeps none —
+// but they are never freed, so they cost one buffer per (thread, slot) for as long
+// as the host keeps that thread. A host that recycles its render pool therefore
+// leaves a buffer behind per retired thread. That is the deliberate trade: the
+// alternative, one shared copy behind a lock, is what a force-terminated Premiere
+// render thread can strand — orphaning the lock across the slow 65^3 load and
+// wedging every later render (see 8f6cfc3). Bounded, unshared memory beats a
+// process-wide hang.
 // A few slots per thread, not one: a comp can stack several graded layers, and a
 // worker thread renders them all for a frame. With a single buffer those layers
 // would fight over it and re-parse the whole 3 MB .cube on every render call.
@@ -100,6 +107,12 @@ static CM_TLS int      g_tls_victim = 0;      // round-robin when all entries ar
 // Hand back a read-only LUT for 'slot'. Returns 1 and sets *out_lut / *out_size
 // when a valid LUT is available; 0 -> caller renders identity.
 static int cm_get_lut(A_long slot, const float **out_lut, int *out_size) {
+	// Slot 0 is the param default — "nothing matched yet", and the engine never
+	// writes slot_0.cube (its counter starts at 1). Answer that from here: a freshly
+	// applied instance would otherwise allocate a 3 MB buffer and re-attempt a
+	// doomed fopen on every single frame until the panel sets a real slot.
+	if (slot <= 0) return 0;
+
 	// Already loaded on this thread? (keyed on ok AND slot, so a failed load of
 	// some other slot can never make a good one look stale)
 	for (int i = 0; i < CM_TLS_SLOTS; i++) {
@@ -372,11 +385,12 @@ static PF_Err Render(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef *para
 	PF_EffectWorld *inputW = &params[CM_INPUT]->u.ld;
 	int identity = 0;
 
-	// The LUT comes from a process-global, slot-keyed cache — NOT sequence data.
+	// The LUT comes from this thread's own slot-keyed cache — NOT sequence data.
 	// Under After Effects Multi-Frame Rendering, Render runs on worker threads
 	// where in_data->sequence_data is NULL, so any LUT stashed there is invisible
-	// (that was the "renders identity in AE" bug). The cache is visible from every
-	// thread and process, so both Premiere and AE (MFR or not) get the real LUT.
+	// (that was the "renders identity in AE" bug). Every thread loads its own copy
+	// from the immutable .cube, so Premiere and AE (MFR or not) both get a real LUT
+	// with no shared state to synchronise.
 	const float *lut = NULL;
 	int lut_size = 0;
 	// At zero intensity the render is identity whatever the LUT says, so don't even
