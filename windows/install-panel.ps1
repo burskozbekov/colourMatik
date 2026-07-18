@@ -24,6 +24,8 @@ try {
     }
 } catch {}
 $Roaming = Join-Path $UserProfile "AppData\Roaming"
+$Ext = Join-Path $Roaming "Adobe\UXP\Plugins\External"
+$Reg = Join-Path $Roaming "Adobe\UXP\PluginsInfo\v1\premierepro.json"
 
 # --- find the panel source (next to this script, or the default install dir) --
 # $MyInvocation.MyCommand.Path is $null when this is run via Invoke-Expression
@@ -37,20 +39,32 @@ $cands += (Join-Path $env:USERPROFILE "colourMatik\colourmatik-uxp")
 foreach ($cand in $cands) {
     if ($cand -and (Test-Path (Join-Path $cand "manifest.json"))) { $Src = $cand; break }
 }
+if (-not $Src) { throw "Couldn't find the colourMatik panel files. Re-run the colourMatik setup, then this." }
 
-$Ext  = Join-Path $Roaming "Adobe\UXP\Plugins\External"
-$Dest = Join-Path $Ext "com.colourmatik.panel_1.0.0"
-$Reg  = Join-Path $Roaming "Adobe\UXP\PluginsInfo\v1\premierepro.json"
+# --- the install folder MUST be <pluginId>_<manifest version> -----------------
+# Premiere only lists a UXP panel whose folder name matches its manifest version
+# (every panel it loads follows that convention). Ours had drifted — the folder
+# was pinned at _1.0.0 while the manifest moved to 1.2.0 — so Premiere quietly
+# refused to show it. Derive BOTH the folder and the registry entry from the
+# manifest so they can never drift apart again.
+$mf        = Get-Content (Join-Path $Src "manifest.json") -Raw | ConvertFrom-Json
+$PluginId  = $mf.id
+$Version   = $mf.version
+$PanelName = $mf.name
+$MinHost   = "26.0"
+try { if ($mf.host.minVersion) { $MinHost = $mf.host.minVersion } } catch {}
+$Folder    = $PluginId + "_" + $Version
+$Dest      = Join-Path $Ext $Folder
 
 # --- copy the panel files -----------------------------------------------------
-if ($Src) {
-    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-    foreach ($f in @("manifest.json", "index.html", "main.js")) {
-        Copy-Item (Join-Path $Src $f) $Dest -Force
-    }
-} elseif (-not (Test-Path (Join-Path $Dest "manifest.json"))) {
-    throw "Couldn't find the colourMatik panel files. Re-run the colourMatik setup, then this."
+New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+foreach ($f in @("manifest.json", "index.html", "main.js")) {
+    Copy-Item (Join-Path $Src $f) $Dest -Force
 }
+# drop stale <pluginId>_<older version> folders so only one copy is ever present
+Get-ChildItem $Ext -Directory -Filter ($PluginId + "_*") -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne $Folder } |
+    ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
 
 # --- register it in Premiere's UXP registry -----------------------------------
 if (Test-Path $Reg) {
@@ -63,15 +77,15 @@ if (Test-Path $Reg) {
 }
 
 $entry = [pscustomobject]@{
-    hostMinVersion = "26.0"
-    name           = "colourMatik"
-    path           = '$localPlugins/External/com.colourmatik.panel_1.0.0'
-    pluginId       = "com.colourmatik.panel"
+    hostMinVersion = $MinHost
+    name           = $PanelName
+    path           = '$localPlugins/External/' + $Folder
+    pluginId       = $PluginId
     status         = "enabled"
     type           = "uxp"
-    versionString  = "1.2.0"
+    versionString  = $Version
 }
-$others = @($j.plugins | Where-Object { $_.pluginId -ne "com.colourmatik.panel" })
+$others = @($j.plugins | Where-Object { $_.pluginId -ne $PluginId })
 $all    = @($others) + @($entry)
 
 # Build the JSON by hand so it is bullet-proof on Windows PowerShell 5.1:
@@ -92,5 +106,5 @@ else                    { $json = '{"plugins":' + $pluginsJson + "}" }
 [System.IO.File]::WriteAllText($Reg, $json, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host ""
-Write-Host "colourMatik panel registered for $env:USERNAME."
+Write-Host "colourMatik $Version registered for $env:USERNAME  ->  $Folder"
 Write-Host "Now: fully quit and reopen Premiere Pro -> Window > UXP Plugins > colourMatik."

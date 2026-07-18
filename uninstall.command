@@ -10,7 +10,7 @@ launchctl bootout "gui/$(id -u)/com.colourmatik.engine" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/com.colourmatik.engine.plist"
 
 say "Removing the Premiere panel..."
-rm -rf "$HOME/Library/Application Support/Adobe/UXP/Plugins/External/com.colourmatik.panel_1.0.0"
+rm -rf "$HOME/Library/Application Support/Adobe/UXP/Plugins/External/"com.colourmatik.panel_*
 REG="$HOME/Library/Application Support/Adobe/UXP/PluginsInfo/v1/premierepro.json"
 if [ -f "$REG" ]; then
   python3 - "$REG" <<'PY' 2>/dev/null || true

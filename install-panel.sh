@@ -7,7 +7,6 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$DIR/colourmatik-uxp"
 EXT="$HOME/Library/Application Support/Adobe/UXP/Plugins/External"
-DEST="$EXT/com.colourmatik.panel_1.0.0"
 REG="$HOME/Library/Application Support/Adobe/UXP/PluginsInfo/v1/premierepro.json"
 
 # Create the registry if Premiere hasn't run yet, so a fresh machine works too.
@@ -18,23 +17,44 @@ if [ ! -f "$REG" ]; then
 fi
 
 cp "$REG" "$REG.colourmatik-backup"
-mkdir -p "$DEST"
-cp "$SRC/manifest.json" "$SRC/index.html" "$SRC/main.js" "$DEST/"
 
-python3 - "$REG" <<'PY'
-import json, sys
-reg = sys.argv[1]
+# The install folder MUST be <pluginId>_<manifest version> — that is the
+# convention every UXP panel Premiere lists follows. Ours had drifted (folder
+# pinned at _1.0.0 while the manifest moved to 1.2.0) and Premiere quietly
+# refused to show it. Derive folder + registry entry from the manifest so they
+# can never drift apart again.
+mkdir -p "$EXT"
+python3 - "$SRC" "$EXT" "$REG" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+
+src, ext, reg = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+mf = json.load(open(src / "manifest.json"))
+plugin_id, version = mf["id"], mf["version"]
+folder = f"{plugin_id}_{version}"
+dest = ext / folder
+
+dest.mkdir(parents=True, exist_ok=True)
+for f in ("manifest.json", "index.html", "main.js"):
+    shutil.copy2(src / f, dest / f)
+
+# drop stale <pluginId>_<older version> folders so only one copy is ever present
+for old in ext.glob(f"{plugin_id}_*"):
+    if old.name != folder and old.is_dir():
+        shutil.rmtree(old, ignore_errors=True)
+
 d = json.load(open(reg))
 d.setdefault("plugins", [])
-d["plugins"] = [p for p in d["plugins"] if p.get("pluginId") != "com.colourmatik.panel"]
+d["plugins"] = [p for p in d["plugins"] if p.get("pluginId") != plugin_id]
 d["plugins"].append({
-    "hostMinVersion": "26.0", "name": "colourMatik",
-    "path": "$localPlugins/External/com.colourmatik.panel_1.0.0",
-    "pluginId": "com.colourmatik.panel", "status": "enabled",
-    "type": "uxp", "versionString": "1.2.0",
+    "hostMinVersion": mf.get("host", {}).get("minVersion", "26.0"),
+    "name": mf.get("name", "colourMatik"),
+    "path": f"$localPlugins/External/{folder}",
+    "pluginId": plugin_id, "status": "enabled",
+    "type": "uxp", "versionString": version,
 })
 json.dump(d, open(reg, "w"))
-print("registered:", [p["pluginId"] for p in d["plugins"]])
+print(f"registered {plugin_id} {version} -> {folder}")
 PY
 
 echo "Installed. Restart Premiere Pro → Window ▸ UXP Plugins ▸ colourMatik."
