@@ -18,6 +18,7 @@
         "https"
       ],
       "extensions": [
+        ".exe",
         ".app",
         ""
       ]
@@ -27,11 +28,25 @@
     {
       "type": "panel",
       "id": "colourmatik",
-      "minimumSize": { "width": 260, "height": 320 },
-      "maximumSize": { "width": 2000, "height": 2000 },
-      "preferredDockedSize": { "width": 340, "height": 560 },
-      "preferredFloatingSize": { "width": 360, "height": 640 },
-      "label": { "default": "colourMatik" }
+      "minimumSize": {
+        "width": 260,
+        "height": 320
+      },
+      "maximumSize": {
+        "width": 2000,
+        "height": 2000
+      },
+      "preferredDockedSize": {
+        "width": 340,
+        "height": 560
+      },
+      "preferredFloatingSize": {
+        "width": 360,
+        "height": 640
+      },
+      "label": {
+        "default": "colourMatik"
+      }
     }
   ]
 }
