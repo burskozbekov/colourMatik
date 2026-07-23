@@ -431,3 +431,34 @@ $("intensity").addEventListener("input", onIntensity);
 $("site-link").addEventListener("click", () => openUrl(SITE_URL));
 $("update-link").addEventListener("click", checkForUpdates);
 $("version").textContent = "v" + LOCAL_VERSION;
+
+/* ---- AUTOMATIC updates ----------------------------------------------------
+ * On every panel open: compare the shipped version.json against what is
+ * actually installed (the engine's /version) and, if newer, START THE UPDATE
+ * without any clicks. Windows shows its one unavoidable admin prompt; after
+ * that the updater pulls, reinstalls panel+effect and restarts the engine —
+ * the user only restarts Premiere when it finishes. Runs once per panel open,
+ * at startup only, so it can never interrupt a match in progress. */
+async function autoUpdateCheck() {
+  try {
+    let local = LOCAL_VERSION;
+    try {
+      const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
+      const vj = await vr.json(); if (vj && vj.version) local = vj.version;
+    } catch (e) {}
+    const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!(j && j.version && semverGt(j.version, local))) return;
+    $("update-link").textContent = "Updating to v" + j.version + "…";
+    setStatus("UPDATE", "New version v" + j.version + " — updating automatically. Approve the admin prompt if one appears; when the updater window finishes, restart Premiere Pro.", "busy");
+    const u = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
+    const uj = await u.json().catch(() => ({ ok: false }));
+    if (!uj || !uj.ok) {          // engine too old for /update_now — arm the manual button
+      $("update-link").textContent = "Update v" + j.version + " — install";
+      updateReady = true;
+      setStatus("UPDATE", "New version v" + j.version + " available — click Update below to install.", "idle");
+    }
+  } catch (e) {}
+}
+setTimeout(autoUpdateCheck, 1500);

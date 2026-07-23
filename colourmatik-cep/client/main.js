@@ -312,3 +312,32 @@ try {
   if (refLbl) refLbl.textContent = "REFERENCE — THE LOOK TO COPY";
   if (tgtLbl) tgtLbl.textContent = "TARGET — APPLY THE LOOK TO THIS";
 } catch (e) {}
+
+/* ---- AUTOMATIC updates ----------------------------------------------------
+ * On every panel open: compare the shipped version.json against what is
+ * actually installed (the engine's /version) and, if newer, START THE UPDATE
+ * without any clicks. Runs once, at startup only, so it can never interrupt a
+ * match in progress. */
+function autoUpdateCheck() {
+  var el = $("update-link");
+  getJSON("/version", 3000).catch(function () { return null; }).then(function (v) {
+    var local = (v && v.version) ? v.version : LOCAL_VERSION;
+    var doFetch = function () {
+      if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
+      return getJSONAbs(UPDATE_URL);
+    };
+    return doFetch().then(function (j) {
+      if (!(j && j.version && semverGt(j.version, local))) return;
+      el.textContent = "Updating to v" + j.version + "…";
+      setStatus("UPDATE", "New version v" + j.version + " — updating automatically. Approve the admin prompt if one appears; when the updater window finishes, restart After Effects.", "busy");
+      return postJSON("/update_now", {}, 8000).then(function (uj) {
+        if (!uj || !uj.ok) throw new Error("no update endpoint");
+      }).catch(function () {   // engine too old for /update_now — arm the manual button
+        el.textContent = "Update v" + j.version + " — install";
+        updateReady = true;
+        setStatus("UPDATE", "New version v" + j.version + " available — click Update below to install.", "idle");
+      });
+    });
+  }).catch(function () {});
+}
+setTimeout(autoUpdateCheck, 1500);
