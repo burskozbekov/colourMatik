@@ -13,7 +13,7 @@ from . import colorspace as cs
 from . import transforms as tf_mod
 from .metrics import (delta_e00, image_delta_e00, sliced_wasserstein,
                       summarize, verdict)
-from .lut import build_lut, apply_lut, apply_lut_points, resample_lut
+from .lut import build_lut, apply_lut, apply_lut_points, resample_lut, gamut_guard
 from .skin import skin_probability, skin_mask
 
 
@@ -70,6 +70,23 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         except Exception:
             lut = None
         if lut is not None:
+            # Same gamut guard as the classical path: outside the colours the
+            # source actually contains, fall back to the capped global MKL so the
+            # learned grade can't hand out-of-sample pixels something insane.
+            try:
+                _rngg = np.random.default_rng(seed)
+                _Se = src_enc.reshape(-1, 3)
+                _Te = tgt_enc.reshape(-1, 3)
+                _si = (_rngg.choice(_Se.shape[0], 200_000, replace=False)
+                       if _Se.shape[0] > 200_000 else np.arange(_Se.shape[0]))
+                _ti = (_rngg.choice(_Te.shape[0], 200_000, replace=False)
+                       if _Te.shape[0] > 200_000 else np.arange(_Te.shape[0]))
+                _fb = build_lut(tf_mod.fit_mkl(cs.decode(_Se[_si], tf),
+                                               cs.decode(_Te[_ti], tf)),
+                                size=size, tf=tf)
+                lut = gamut_guard(lut, _Se[_si], _fb)
+            except Exception:
+                pass
             res = MatchResult(method="canon", scores={"canon": 0.0}, lut=lut, tf=tf,
                               corresponded=corresponded,
                               score_metric="AI cinematic grade (CanonCGT)")
@@ -202,9 +219,17 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         except Exception:
             pass
 
+    # Gamut guard — the "sometimes the colours go insane" fix. The winner was fit
+    # and scored only on sampled pixels; in cube regions those samples never
+    # touched, blend it toward the gain-capped global MKL so a later frame's
+    # out-of-sample colour (flash, neon, deep shadow) can never read extrapolation
+    # garbage. Sampled regions are untouched, so the scores above still hold.
+    if "mkl" in luts:
+        res.lut = gamut_guard(res.lut, Sf_enc, luts["mkl"])
+
     if corresponded and src_enc.shape == tgt_enc.shape:
         de_b = image_delta_e00(src_enc, tgt_enc, tf)
-        de_a = image_delta_e00(apply_lut(src_enc, luts[best]), tgt_enc, tf)
+        de_a = image_delta_e00(apply_lut(src_enc, res.lut), tgt_enc, tf)
         res.de_before = summarize(de_b)
         res.de_after = summarize(de_a)
         sm = skin_mask(S_enc)

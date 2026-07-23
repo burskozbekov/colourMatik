@@ -12,6 +12,42 @@ from scipy.interpolate import RegularGridInterpolator
 from .colorspace import decode, encode
 
 
+def gamut_guard(lut: np.ndarray, samples_enc: np.ndarray,
+                fallback: np.ndarray, sigma: float = 2.5,
+                ref_pct: float = 30.0) -> np.ndarray:
+    """Blend `lut` toward a safe `fallback` in cube regions the source never covered.
+
+    Every candidate is FIT and SCORED only on pixels sampled from the source
+    frames, but the baked LUT spans the whole RGB cube. Outside the sampled
+    cloud nothing constrains the winner — a degree-3 polynomial happily explodes
+    there, and a lattice's unsupported nodes drift toward black — yet later
+    frames of the clip WILL contain colours the sampled frames didn't (a flash,
+    a neon sign, deep shadow). Those pixels then read garbage: the occasional
+    "insane colours" failure.
+
+    Fix at one choke point: histogram the sampled source pixels into the LUT
+    grid, smooth lightly, and per node blend `lut` toward `fallback` (the
+    gain-capped global MKL — smooth and sane over the whole cube) by how much
+    data support the node has. Well-sampled nodes keep the winner bit-for-bit,
+    so measured accuracy is untouched; unsupported nodes get the safe global
+    look instead of extrapolation noise.
+    """
+    from scipy.ndimage import gaussian_filter
+    size = lut.shape[0]
+    pts = np.clip(np.asarray(samples_enc, dtype=np.float64).reshape(-1, 3), 0.0, 1.0)
+    bins = np.linspace(0.0, 1.0, size + 1)
+    hist, _ = np.histogramdd(pts, bins=(bins, bins, bins))   # indexed [r,g,b]
+    support = gaussian_filter(hist, sigma=sigma, mode="nearest")
+    pos = support[support > 1e-12]
+    if pos.size == 0:
+        return fallback.copy()
+    ref = np.percentile(pos, ref_pct)
+    if ref <= 0:
+        ref = float(pos.mean()) or 1.0
+    w = np.clip(support / ref, 0.0, 1.0)[..., None]
+    return w * lut + (1.0 - w) * fallback
+
+
 def build_lut(transform_lin, size: int = 65, tf: str = "sRGB") -> np.ndarray:
     """Sample `transform_lin` on an encoded grid -> LUT array indexed [r, g, b, 3]."""
     axis = np.linspace(0.0, 1.0, size)
