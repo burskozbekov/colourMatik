@@ -101,6 +101,81 @@ def fit_mkl(src_lin: np.ndarray, tgt_lin: np.ndarray):
     return f
 
 
+def fit_sep(src_lin: np.ndarray, tgt_lin: np.ndarray):
+    """Separated transfer: per-channel 1D quantile curves, then a capped-MKL 3D
+    residual — composed into one transform.
+
+    The 1D stage absorbs exposure, white balance, and contrast (each channel's
+    marginal distribution is matched with a monotone curve); the 3D stage only
+    has to fix what 1D cannot — cross-channel hue/saturation mixing — so it stays
+    small and stable. SepLUT (ECCV 2022) measured this 1D-then-3D split beating a
+    single coupled 3D map; it also mirrors how hardware ISPs are built.
+    """
+    qs = np.linspace(0.01, 0.99, 33)
+    curves = []
+    for c in range(3):
+        xq = np.quantile(src_lin[:, c], qs)
+        yq = np.quantile(tgt_lin[:, c], qs)
+        xq = np.maximum.accumulate(xq) + np.arange(33) * 1e-9  # strictly increasing
+        yq = np.maximum.accumulate(yq)
+        # linear extension beyond the observed range, with SANE slopes (a curve
+        # fitted on 1..99% quantiles says nothing about far highlights; an
+        # unbounded edge slope would re-create the extrapolation blow-up)
+        lo_m = np.clip((yq[1] - yq[0]) / max(xq[1] - xq[0], 1e-9), 0.0, 6.0)
+        hi_m = np.clip((yq[-1] - yq[-2]) / max(xq[-1] - xq[-2], 1e-9), 0.0, 6.0)
+        curves.append((xq, yq, lo_m, hi_m))
+
+    def apply_curves(x):
+        out = np.empty_like(x)
+        for c in range(3):
+            xq, yq, lo_m, hi_m = curves[c]
+            v = np.interp(x[:, c], xq, yq)
+            below = x[:, c] < xq[0]
+            above = x[:, c] > xq[-1]
+            v[below] = yq[0] + (x[below, c] - xq[0]) * lo_m
+            v[above] = yq[-1] + (x[above, c] - xq[-1]) * hi_m
+            out[:, c] = v
+        return out
+
+    resid = fit_mkl(apply_curves(src_lin), tgt_lin)   # capped, see fit_mkl
+
+    def f(x: np.ndarray) -> np.ndarray:
+        return resid(apply_curves(np.atleast_2d(x)))
+
+    f.kind = "sep"  # type: ignore[attr-defined]
+    return f
+
+
+def fit_uot(src_pts: np.ndarray, tgt_pts: np.ndarray, blur: float = 0.05,
+            reach: float = 0.4) -> np.ndarray:
+    """Unbalanced Sinkhorn transport of `src_pts` toward `tgt_pts` (linear RGB).
+
+    Pitié's IDT matches distributions EXACTLY, mass for mass — so when the
+    reference has, say, a huge blue sky and the target has little of it, exact
+    matching forcibly paints something else sky-blue. Relaxing mass conservation
+    (`reach`) lets modes shift without being conserved, and the entropic `blur`
+    keeps the map smooth (the OT literature's fix for grain/quantisation
+    artifacts of raw transport maps). One Sinkhorn gradient step is the
+    documented GeomLoss colour-transfer recipe. Requires torch+geomloss (the AI
+    extras); callers treat ImportError as 'candidate unavailable'.
+    """
+    import torch
+    from geomloss import SamplesLoss
+    x = torch.tensor(src_pts, dtype=torch.float32, requires_grad=True)
+    y = torch.tensor(tgt_pts, dtype=torch.float32)
+    # backend="tensorized": pure torch, runs everywhere. The faster "online"
+    # backend needs pykeops, which compiles C++ on the user's machine — a
+    # non-starter for a shipped tool. Tensorized is O(N*M) memory, so callers
+    # keep N,M at a few thousand points (plenty for a 3D colour distribution).
+    loss = SamplesLoss("sinkhorn", p=2, blur=blur, reach=reach, scaling=0.8,
+                       backend="tensorized")
+    L = loss(x, y)
+    (g,) = torch.autograd.grad(L, [x])
+    # uniform weights 1/N -> Brenier displacement is -N * grad
+    out = (x - float(len(src_pts)) * g).detach().cpu().numpy()
+    return np.clip(out.astype(np.float64), 0.0, None)
+
+
 def _rand_rotation(d: int, rng) -> np.ndarray:
     Q, R = np.linalg.qr(rng.normal(size=(d, d)))
     return Q * np.sign(np.diag(R))

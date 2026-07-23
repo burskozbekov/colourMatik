@@ -145,14 +145,35 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         luts["lattice"] = resample_lut(
             tf_mod.fit_lut_lattice(Sf_enc, Tf_enc, L=lattice_L, weights=weights), size)
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)
+        luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)
     else:
         # Different scenes / not aligned: match the colour DISTRIBUTIONS.
         _p(0.10, "Matching colour distributions")
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)  # linear
+        luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)  # 1D curves + 3D residual
         transported = np.clip(tf_mod.fit_idt(Sf_lin, Tf_lin, seed=seed), 0.0, None)  # nonlinear
         lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
                                      L=lattice_L, weights=weights)
         luts["idt"] = resample_lut(lat, size)
+        # Unbalanced Sinkhorn transport (optional — needs torch+geomloss from the
+        # AI extras). Fixes IDT's exact-mass failure: a reference dominated by one
+        # colour (a huge sky) no longer forces that colour onto unrelated content.
+        try:
+            _u = np.random.default_rng(seed + 1)
+            cap = 6_000   # tensorized Sinkhorn is O(N*M); 6k points describe a 3D colour cloud fine
+            ui = (_u.choice(Sf_lin.shape[0], cap, replace=False)
+                  if Sf_lin.shape[0] > cap else np.arange(Sf_lin.shape[0]))
+            uj = (_u.choice(Tf_lin.shape[0], cap, replace=False)
+                  if Tf_lin.shape[0] > cap else np.arange(Tf_lin.shape[0]))
+            tx = tf_mod.fit_uot(Sf_lin[ui], Tf_lin[uj])
+            uw = weights[ui] if weights is not None else None
+            luts["uot"] = resample_lut(
+                tf_mod.fit_lut_lattice(Sf_enc[ui], cs.encode(tx, tf),
+                                       L=lattice_L, weights=uw), size)
+        except ImportError:
+            pass          # geomloss not installed -> candidate simply absent
+        except Exception:
+            pass          # never let an optional candidate sink the match
         # Local-AI candidate #1: scene segmentation -> region-to-region transport.
         if neural:
             try:

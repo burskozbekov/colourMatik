@@ -210,8 +210,13 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
     # running them in parallel roughly halves the frame-extraction wait.
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as ex:
-        fs = ex.submit(cmio.load_any, src_path, frames=f, start=si, end=so)
-        fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro)
+        # robust sampling (extra candidates + dominant-look selection) only in
+        # distribution mode — corresponded mode needs identical frame indices on
+        # both clips, and dropping different outliers per clip would break pairs.
+        fs = ex.submit(cmio.load_any, src_path, frames=f, start=si, end=so,
+                       robust=not corresponded)
+        fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro,
+                       robust=not corresponded)
         src, ref = fs.result(), fr.result()
 
     _set_progress(job_id, 0.16, "Analysing colour")
@@ -444,6 +449,39 @@ def effect_lut(req: EffectLutReq):
 @app.get("/version")
 def version():
     return {"name": "colourMatik", "version": __version__}
+
+
+@app.post("/update_now")
+def update_now():
+    """Launch the platform updater, detached — the panel's Update button.
+
+    The updater pulls the newest code, refreshes deps, reinstalls panel+effect
+    and restarts this engine, so it must OUTLIVE this process: on Windows
+    `cmd start` detaches (and update-windows.cmd self-elevates with its own UAC
+    prompt); on macOS it opens in Terminal so the user can watch."""
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    try:
+        if os.name == "nt":
+            upd = root / "windows" / "update-windows.cmd"
+            if not upd.exists():
+                return JSONResponse({"ok": False, "error": "updater not found"}, status_code=404)
+            subprocess.Popen(["cmd", "/c", "start", "colourMatik Update", str(upd)],
+                             cwd=str(root),
+                             creationflags=(0x00000008 | 0x00000200))  # DETACHED | NEW_PROCESS_GROUP
+        else:
+            upd = root / "update.command"
+            if not upd.exists():
+                return JSONResponse({"ok": False, "error": "updater not found"}, status_code=404)
+            try:
+                subprocess.Popen(["open", "-a", "Terminal", str(upd)])
+            except Exception:
+                subprocess.Popen(["/bin/bash", str(upd)], cwd=str(root),
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        return {"ok": True, "started": True, "from_version": __version__}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.get("/download/{rid}")

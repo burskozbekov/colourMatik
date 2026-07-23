@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.2.0";
+var LOCAL_VERSION = "1.3.0";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -250,18 +250,36 @@ function semverGt(a, b) {
   for (var i = 0; i < 3; i++) { var x = +pa[i] || 0, y = +pb[i] || 0; if (x > y) return true; if (x < y) return false; }
   return false;
 }
-var updateUrl = null;
+var updateReady = false;   // first click checks; once found, the next click INSTALLS
 function checkForUpdates() {
-  if (updateUrl) { cs.openURLInDefaultBrowser(updateUrl); return; }
-  $("update-link").textContent = "Checking…";
   var done = function (txt) { $("update-link").textContent = txt; };
+  if (updateReady) {
+    // Second click: actually update — the engine launches the platform updater
+    // (pulls newest code, reinstalls panel+effect, restarts itself).
+    done("Updating…");
+    postJSON("/update_now", {}, 8000).then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || "update failed");
+      done("Updating — see the window");
+      setStatus("UPDATE", "Updater started in its own window (approve the admin prompt if asked). When it finishes, restart After Effects.", "busy");
+    }).catch(function () {
+      cs.openURLInDefaultBrowser(SITE_URL);   // engine too old/down — download page
+      done("Update from the site →");
+    });
+    return;
+  }
+  done("Checking…");
   var doFetch = function () {
     if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
     return getJSONAbs(UPDATE_URL);
   };
-  doFetch().then(function (j) {
-    if (j && j.version && semverGt(j.version, LOCAL_VERSION)) { done("Update v" + j.version + " →"); updateUrl = j.url || SITE_URL; }
-    else done("Up to date");
+  // compare against what is actually INSTALLED (the engine's version); fall back
+  // to this panel's own version when the engine isn't running
+  getJSON("/version", 3000).catch(function () { return null; }).then(function (v) {
+    var local = (v && v.version) ? v.version : LOCAL_VERSION;
+    return doFetch().then(function (j) {
+      if (j && j.version && semverGt(j.version, local)) { done("Update v" + j.version + " — install"); updateReady = true; }
+      else done("Up to date");
+    });
   }).catch(function () { done("Check failed"); });
 }
 function getJSONAbs(url) {

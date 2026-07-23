@@ -96,6 +96,58 @@ def _probe_duration(video: str | Path) -> float | None:
     return None
 
 
+def _strip_black_bars(img: np.ndarray) -> np.ndarray:
+    """Crop letterbox/pillarbox bars off a frame before it enters the match.
+
+    Hard black bars are not part of the footage's look, but they dominate a
+    colour histogram (often 20-30% of all pixels) and drag every distribution
+    method toward black. A bar row/column is near-black AND near-flat across the
+    whole frame — real content (even a night sky) carries more variance. Caps at
+    35% per side so a genuinely dark frame can never be cropped away."""
+    h, w = img.shape[:2]
+    if h < 32 or w < 32:
+        return img
+    luma = img.mean(axis=2)
+    def run(means, stds, cap):
+        k = 0
+        for m, s in zip(means, stds):
+            if m < 0.03 and s < 0.015:
+                k += 1
+            else:
+                break
+        return k if 2 <= k <= cap else 0
+    top = run(luma.mean(axis=1), luma.std(axis=1), int(h * 0.35))
+    bot = run(luma.mean(axis=1)[::-1], luma.std(axis=1)[::-1], int(h * 0.35))
+    left = run(luma.mean(axis=0), luma.std(axis=0), int(w * 0.35))
+    right = run(luma.mean(axis=0)[::-1], luma.std(axis=0)[::-1], int(w * 0.35))
+    if top + bot >= h - 16 or left + right >= w - 16:
+        return img
+    return img[top:h - bot if bot else h, left:w - right if right else w]
+
+
+def _keep_dominant(frames: list, n: int) -> list:
+    """From a pool of candidate frames, keep the `n` that share the DOMINANT look.
+
+    Seven uniform samples on a multi-shot clip land on different scenes; matching
+    their mixed distribution fits none of them. Rank each frame's coarse colour
+    histogram by distance to the pool's median look and keep the n closest —
+    cuts to other scenes, white flashes and black leaders fall away. Temporal
+    order is preserved for the stack."""
+    if len(frames) <= n:
+        return frames
+    sigs = []
+    for f in frames:
+        small = f[::max(1, f.shape[0] // 90), ::max(1, f.shape[1] // 160)]
+        hist, _ = np.histogramdd(small.reshape(-1, 3), bins=(8, 8, 8),
+                                 range=((0, 1), (0, 1), (0, 1)))
+        hist = hist.ravel()
+        sigs.append(hist / (hist.sum() or 1.0))
+    sigs = np.asarray(sigs)
+    dist = np.abs(sigs - np.median(sigs, axis=0)).sum(axis=1)
+    keep = np.sort(np.argsort(dist)[:n])
+    return [frames[i] for i in keep]
+
+
 def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
     """Extract one representative frame (default: middle) as encoded float RGB."""
     dur = _probe_duration(video)
@@ -130,7 +182,8 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
 
 
 def extract_frames(video: str | Path, n: int = 3,
-                   start: float | None = None, end: float | None = None) -> np.ndarray:
+                   start: float | None = None, end: float | None = None,
+                   robust: bool = True) -> np.ndarray:
     """Extract `n` frames spread across the clip and stack them vertically.
 
     Pooling several frames gives a more representative colour distribution than a
@@ -159,8 +212,14 @@ def extract_frames(video: str | Path, n: int = 3,
         return np.concatenate([f0] * n, axis=0)
     # sample at interior points of the range, avoiding the very first/last frame
     span = hi - lo
-    times = [lo + span * (i + 1) / (n + 1) for i in range(n)]
-    frames = [extract_frame(video, t) for t in times]
+    # In robust mode, sample EXTRA candidates and keep the n that share the
+    # dominant look (drops cuts to other scenes / flashes / leaders). Off in
+    # corresponded mode, where both clips must keep identical frame indices.
+    m = n + 4 if (robust and n >= 5) else n
+    times = [lo + span * (i + 1) / (m + 1) for i in range(m)]
+    frames = [_strip_black_bars(extract_frame(video, t)) for t in times]
+    if m > n:
+        frames = _keep_dominant(frames, n)
     h = min(f.shape[0] for f in frames)
     w = min(f.shape[1] for f in frames)
     frames = [f[:h, :w] for f in frames]
@@ -168,7 +227,8 @@ def extract_frames(video: str | Path, n: int = 3,
 
 
 def load_any(path: str | Path, t: float | None = None, frames: int = 1,
-             start: float | None = None, end: float | None = None) -> np.ndarray:
+             start: float | None = None, end: float | None = None,
+             robust: bool = True) -> np.ndarray:
     """Load an image, or extract frame(s) from a video, into encoded float RGB.
 
     Routed by CAPABILITY, not by extension allowlist: only known still-image
@@ -183,6 +243,6 @@ def load_any(path: str | Path, t: float | None = None, frames: int = 1,
     try:
         if t is not None:
             return extract_frame(path, t)
-        return extract_frames(path, frames, start=start, end=end)
+        return extract_frames(path, frames, start=start, end=end, robust=robust)
     except Exception:
         return load_image(path)

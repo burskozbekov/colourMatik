@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.2 — one-double-click installers for both platforms (notarized macOS app + Windows Setup.exe), live progress bar on Match & Apply, faster engine, new chameleon-on-film app icon."
+  "notes": "colourMatik 1.3 — better colours: black-bar/letterbox exclusion, dominant-shot frame sampling, gamut guard (no more insane out-of-sample colours), separated 1D+3D match, unbalanced-transport candidate; the panel's Update button now installs updates itself."
 }

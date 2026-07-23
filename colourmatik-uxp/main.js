@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.2.0";
+const LOCAL_VERSION = "1.3.0";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -368,22 +368,46 @@ function semverGt(a, b) {
   return false;
 }
 async function openUrl(u) { try { await uxp.shell.openExternal(u); } catch (e) {} }
-let updateUrl = null;   // set once an update is found; the single click handler branches on it
+let updateReady = false;   // first click checks; once an update is found, the next click INSTALLS it
 async function checkForUpdates() {
-  if (updateUrl) return openUrl(updateUrl);   // already found — clicking opens the download
-  $("update-link").textContent = "Checking…";
+  const el = $("update-link");
+  if (updateReady) {
+    // Second click: actually update — the engine launches the platform updater
+    // (pulls newest code, refreshes deps, reinstalls panel+effect, restarts itself).
+    el.textContent = "Updating…";
+    try {
+      const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
+      const j = await r.json().catch(() => ({ ok: false }));
+      if (!j.ok) throw new Error(j.error || "update failed");
+      el.textContent = "Updating — see the window";
+      setStatus("UPDATE", "Updater started in its own window (approve the admin prompt if asked). When it finishes, restart Premiere Pro.", "busy");
+    } catch (e) {
+      // engine too old (no /update_now) or down — fall back to the download page
+      openUrl(SITE_URL);
+      el.textContent = "Update from the site →";
+    }
+    return;
+  }
+  el.textContent = "Checking…";
   try {
+    // compare against what is actually INSTALLED (the engine's version); fall
+    // back to this panel's own version if the engine isn't running
+    let local = LOCAL_VERSION;
+    try {
+      const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
+      const vj = await vr.json(); if (vj && vj.version) local = vj.version;
+    } catch (e) {}
     const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
-    if (j.version && semverGt(j.version, LOCAL_VERSION)) {
-      $("update-link").textContent = "Update v" + j.version + " →";
-      updateUrl = j.url || SITE_URL;
+    if (j.version && semverGt(j.version, local)) {
+      el.textContent = "Update v" + j.version + " — install";
+      updateReady = true;
     } else {
-      $("update-link").textContent = "Up to date";
+      el.textContent = "Up to date";
     }
   } catch (e) {
-    $("update-link").textContent = "Check failed";
+    el.textContent = "Check failed";
   }
 }
 
