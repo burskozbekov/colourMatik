@@ -241,6 +241,7 @@ async function run() {
   };
   $("run").disabled = true;
   $("preview").className = "hidden";
+  $("alts").className = "hidden"; $("alts").innerHTML = "";
   state.slot = null;                 // mid-match intensity drags must no-op, not apply the old LUT
   $("intensity-section").className = "section hidden";
   setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
@@ -301,6 +302,7 @@ async function run() {
       $("intensity").value = DEFAULT_INTENSITY;
       $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
     }
+    if (slot != null) loadAlts(j.rid, tgt, gen);   // clickable alternative looks
 
     const label = j.method_label || j.method;
     const mTxt = j.ai_used ? `${label} 🧠` : label;   // brain = local AI chose the match
@@ -340,6 +342,44 @@ async function run() {
       refreshRun();
     }
   }
+}
+
+/* ---- Alternative looks: the contest's top candidates, clickable ----------- */
+async function loadAlts(rid, tgt, gen) {
+  try {
+    const r = await fetchT(SERVER + "/alts/" + rid, { cache: "no-cache" }, 20000);
+    const j = await r.json();
+    if (!j.ok || !j.alts || j.alts.length < 2) return;   // nothing worth choosing
+    if (gen !== _runGen) return;
+    const box = $("alts");
+    box.innerHTML = "";
+    for (const a of j.alts) {
+      const d = document.createElement("div");
+      d.className = "alt" + (a.chosen ? " selected" : "");
+      d.innerHTML = '<img src="' + a.preview + '"><div class="alt-name">' + a.label + "</div>";
+      d.addEventListener("click", async () => {
+        if (gen !== _runGen) return;
+        try {
+          const res = await fetchT(SERVER + "/effect_lut", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rid: rid, variant: a.key }),
+          }, 30000);
+          const ej = await res.json();
+          if (!ej.ok) throw new Error(ej.error || "variant failed");
+          state.slot = ej.slot;
+          const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
+          if (tgt.trackItem) { try { await applyEffect(tgt.trackItem, ej.slot, pct); } catch (e) {} }
+          for (const el of box.children) el.className = "alt";
+          d.className = "alt selected";
+          setStatus("DONE", "Look switched to " + a.label + ".", "done");
+        } catch (e) {
+          setStatus("ERROR", "Couldn't switch look: " + (e.message || e), "error");
+        }
+      });
+      box.appendChild(d);
+    }
+    box.className = "";
+  } catch (e) {}
 }
 
 /* ---- Intensity: live re-scale of the applied Lumetri sliders --------------- */

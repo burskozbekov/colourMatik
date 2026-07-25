@@ -40,3 +40,36 @@ def linear_to_lab(lin: np.ndarray) -> np.ndarray:
 
 def encoded_to_lab(enc: np.ndarray, tf: str = "sRGB") -> np.ndarray:
     return linear_to_lab(decode(enc, tf))
+
+
+# ---------------------------------------------------------------- Oklab
+# Ottosson's Oklab (the CSS Color 4 space): near-CAM16-UCS perceptual uniformity
+# at a trivial cost, and it fixes CIELAB's classic defect for grading work —
+# blues drifting purple as lightness/chroma move. Reference constants from
+# https://bottosson.github.io/posts/oklab/ (public-domain/MIT reference code).
+_OK_M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
+                   [0.2119034982, 0.6806995451, 0.1073969566],
+                   [0.0883024619, 0.2817188376, 0.6299787005]])
+_OK_M2 = np.array([[0.2104542553, 0.7936177850, -0.0040720468],
+                   [1.9779984951, -2.4285922050, 0.4505937099],
+                   [0.0259040371, 0.7827717662, -0.8086757660]])
+_OK_M1I = np.linalg.inv(_OK_M1)
+_OK_M2I = np.linalg.inv(_OK_M2)
+
+
+def linear_to_oklab(lin: np.ndarray) -> np.ndarray:
+    """Linear sRGB -> Oklab. Shape (...,3) preserved. L in ~[0,1]."""
+    lin = np.asarray(lin, dtype=np.float64)
+    lms = lin @ _OK_M1.T
+    lms = np.cbrt(np.clip(lms, 0.0, None))
+    return lms @ _OK_M2.T
+
+
+def oklab_to_linear(lab: np.ndarray) -> np.ndarray:
+    """Oklab -> linear sRGB (may land outside [0,1] — that MEANS out of gamut)."""
+    lms = np.asarray(lab, dtype=np.float64) @ _OK_M2I.T
+    return (lms ** 3) @ _OK_M1I.T
+
+
+def encoded_to_oklab(enc: np.ndarray, tf: str = "sRGB") -> np.ndarray:
+    return linear_to_oklab(decode(enc, tf))

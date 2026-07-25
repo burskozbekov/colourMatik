@@ -63,7 +63,7 @@ def _set_progress(job_id, pct, msg):
         while len(_PROGRESS) > 64:                 # bounded; old jobs fall off
             _PROGRESS.pop(next(iter(_PROGRESS)), None)
 _LOCK = threading.Lock()     # serialize LUT-folder writes (avoid concurrent-write races)
-_MAX_CACHE = 32              # cap the in-memory caches — each job holds a LUT + frames (~MBs)
+_MAX_CACHE = 12              # cap the in-memory caches — each job holds a LUT + frames + alt LUTs (~10MB)
 
 
 def _remember(rid: str, cube: Path, job: dict | None = None) -> None:
@@ -162,6 +162,9 @@ _METHOD_LABELS = {
     "mkl": "linear (MKL)",
     "lattice": "3D lattice",
     "poly1": "linear fit", "poly2": "polynomial", "poly3": "polynomial",
+    "sep": "filmic (curves+3D)",
+    "flow": "neural flow",
+    "uot": "balanced transport",
 }
 
 
@@ -249,7 +252,8 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
 
     rid = uuid.uuid4().hex
     _remember(rid, cube, {"lut": res.lut, "tf": tf, "src1": src1, "ref1": ref1,
-                          "corresponded": corresponded})
+                          "corresponded": corresponded, "alts": res.alts,
+                          "scores": res.scores, "method": res.method})
     _set_progress(job_id, 1.0, "Done")
     return {
         "ok": True,
@@ -423,6 +427,41 @@ class EffectLutReq(BaseModel):
     rid: str
     intensity: float = 1.0  # baked at full strength by default; the effect's own
     #                         Intensity slider does the live dialing, so leave at 1.0
+    variant: str | None = None   # pick an alternative candidate look by name
+
+
+@app.get("/alts/{rid}")
+def alts(rid: str):
+    """The top candidate looks for a finished match, as small before-preview
+    thumbnails. The panel renders them as a clickable row; /effect_lut with
+    variant=<key> then bakes the chosen one."""
+    j = _JOBS.get(rid)
+    if j is None:
+        return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
+    try:
+        from PIL import Image
+        src1 = j["src1"]
+        # thumbnail base: ~204px wide, keep aspect
+        h, w = src1.shape[:2]
+        tw = 204; th = max(1, int(h * tw / max(w, 1)))
+        base = np.asarray(Image.fromarray(
+            (np.clip(src1, 0, 1) * 255 + 0.5).astype("uint8")).resize((tw, th)),
+            dtype=np.float64) / 255.0
+        out = []
+        for name, alt in (j.get("alts") or {}).items():
+            img = apply_lut(base, np.asarray(alt, dtype=np.float64))
+            buf = Path(tempfile.mkstemp(suffix=".jpg")[1])
+            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(buf, quality=82)
+            data = "data:image/jpeg;base64," + _b64.b64encode(buf.read_bytes()).decode()
+            buf.unlink(missing_ok=True)
+            out.append({"key": name, "label": _method_label(name),
+                        "score": float((j.get("scores") or {}).get(name.partition("+")[0], 0.0)),
+                        "preview": data,
+                        "chosen": name == j.get("method")})
+        return {"ok": True, "alts": out}
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
 
 
 @app.post("/effect_lut")
@@ -434,6 +473,12 @@ def effect_lut(req: EffectLutReq):
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
     try:
         lut = j["lut"]
+        if req.variant:
+            alt = (j.get("alts") or {}).get(req.variant)
+            if alt is None:
+                return JSONResponse({"ok": False, "error": "unknown variant"}, status_code=404)
+            lut = np.asarray(alt, dtype=np.float64)
+            j["lut"] = lut          # strength/wipe operations follow the chosen look
         if req.intensity != 1.0:
             lut = apply_intensity(lut, float(req.intensity))
         lut_fx = resample_lut(lut, _EFFECT_LUT_SIZE)

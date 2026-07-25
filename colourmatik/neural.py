@@ -25,7 +25,14 @@ from . import colorspace as cs
 from . import transforms as tf_mod
 from .lut import resample_lut
 
-_MODEL_NAME = "nvidia/segformer-b0-finetuned-ade-512-512"
+# Primary: EoMT (CVPR 2025) — MIT code AND weights (DINOv2 backbone, Apache-2.0),
+# so it is safe to use in a distributed tool, and its ADE20K masks measure better
+# than SegFormer-B0's. Fallback: the old NVIDIA SegFormer (its weights carry a
+# research-only license, so it is only used when EoMT can't load — old installs,
+# no download). Both are ADE20K/150-class, so the region-matching logic is
+# identical either way.
+_EOMT_NAME = "tue-mps/ade20k_semantic_eomt_large_512"
+_SEGFORMER_NAME = "nvidia/segformer-b0-finetuned-ade-512-512"
 _SEG = None            # cached (model, processor, device) or False if unavailable
 _SEG_LOCK = threading.Lock()   # serialize lazy load + shared-model inference (FastAPI threadpool)
 
@@ -41,13 +48,20 @@ def _load_seg():
     with _SEG_LOCK:                                # avoid a double-load race
         if _SEG is not None:
             return _SEG if _SEG is not False else None
+        import_error = True
         try:
             import torch
-            from transformers import (SegformerImageProcessor,
-                                       SegformerForSemanticSegmentation)
-            proc = SegformerImageProcessor.from_pretrained(_MODEL_NAME)
-            model = SegformerForSemanticSegmentation.from_pretrained(_MODEL_NAME)
+            from transformers import AutoImageProcessor, AutoModelForUniversalSegmentation
             device = "mps" if torch.backends.mps.is_available() else "cpu"
+            try:
+                proc = AutoImageProcessor.from_pretrained(_EOMT_NAME)
+                model = AutoModelForUniversalSegmentation.from_pretrained(_EOMT_NAME)
+            except Exception:
+                # EoMT unavailable (old transformers / download blocked) -> SegFormer
+                from transformers import (SegformerImageProcessor,
+                                          SegformerForSemanticSegmentation)
+                proc = SegformerImageProcessor.from_pretrained(_SEGFORMER_NAME)
+                model = SegformerForSemanticSegmentation.from_pretrained(_SEGFORMER_NAME)
             model.to(device).eval()
             _SEG = (model, proc, device)
         except Exception:
@@ -69,15 +83,22 @@ def _segment(enc: np.ndarray) -> np.ndarray | None:
     from PIL import Image
     model, proc, device = seg
     img = Image.fromarray(_to_u8(enc))
+    # EoMT-large on a bare CPU is heavy; halving the working resolution keeps the
+    # whole AI pass inside the seconds budget with no visible cost to REGION
+    # pooling (we only average colours inside each mask).
+    if device == "cpu" and min(img.size) > 384:
+        s = 384 / min(img.size)
+        img = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
 
     def _run(dev):
         inputs = proc(images=img, return_tensors="pt").to(dev)
         with torch.no_grad():
-            logits = model(**inputs).logits          # (1, C, h, w)
-        small = logits.argmax(1, keepdim=True).float()
-        up = torch.nn.functional.interpolate(
-            small, size=(enc.shape[0], enc.shape[1]), mode="nearest")
-        return up[0, 0].detach().to("cpu").numpy().astype(np.int32)
+            outputs = model(**inputs)
+        # Works for both EoMT and SegFormer processors, and resizes back to the
+        # ORIGINAL frame size in one step.
+        seg_map = proc.post_process_semantic_segmentation(
+            outputs, target_sizes=[(enc.shape[0], enc.shape[1])])[0]
+        return seg_map.detach().to("cpu").numpy().astype(np.int32)
 
     with _SEG_LOCK:                                   # serialize inference on the shared model
         try:

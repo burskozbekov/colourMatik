@@ -3,6 +3,6 @@
 # The engine runs fine without these (classical methods); install for the AI modes.
 torch>=2.2
 torchvision>=0.17
-transformers>=4.40
+transformers>=4.52   # EoMT (MIT segmentation) needs 4.52+; SegFormer fallback below that
 gdown>=5.1
 geomloss>=0.2.6

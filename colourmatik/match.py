@@ -31,6 +31,10 @@ class MatchResult:
     de_skin_before: float | None = None
     de_skin_after: float | None = None
     notes: list = field(default_factory=list)
+    # Top alternative candidate LUTs (name -> guarded float32 LUT), winner first.
+    # The panel shows these as clickable look previews instead of silently
+    # discarding every runner-up.
+    alts: dict = field(default_factory=dict)
 
 
 def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True,
@@ -157,6 +161,18 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
                                      L=lattice_L, weights=weights)
         luts["idt"] = resample_lut(lat, size)
+        # ModFlows (AAAI 2025, MIT weights): encoder-predicted rectified flows,
+        # a pure RGB->RGB map evaluated EXACTLY on the lattice. Optional (needs
+        # torch + a one-time ~170MB weight download); absent -> one fewer candidate.
+        if neural:
+            try:
+                from . import modflows as mf_mod
+                _p(0.30, "Neural flow match")
+                mflut = mf_mod.modflows_lut(src_enc, tgt_enc, size=size)
+                if mflut is not None:
+                    luts["flow"] = mflut
+            except Exception:
+                pass
         # Unbalanced Sinkhorn transport (optional — needs torch+geomloss from the
         # AI extras). Fixes IDT's exact-mass failure: a reference dominated by one
         # colour (a huge sky) no longer forces that colour onto unrelated content.
@@ -188,15 +204,19 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             except Exception:
                 nctx = None
 
-    # Score every candidate LUT on exactly what it will output.
+    # Score every candidate LUT on exactly what it will output. Judged in OKLAB
+    # (x100 to keep dE-like magnitudes): near-CAM16 perceptual uniformity without
+    # CIELAB's blue-drifts-purple defect, so the judge can no longer be gamed by
+    # hue errors CIELAB under-counts. Reported accuracy (de_after) stays dE00 —
+    # the industry-familiar number.
     _p(0.62, "Scoring candidates")
     scores = {}
     if corresponded:
-        metric = "dE00"
-        tgt_lab = cs.encoded_to_lab(T_enc, tf)
+        metric = "Oklab dE (x100)"
+        tgt_ok = cs.encoded_to_oklab(T_enc, tf) * 100.0
         for name, lut in luts.items():
-            out_lab = cs.encoded_to_lab(apply_lut_points(lut, S_enc), tf)
-            scores[name] = float(np.mean(delta_e00(out_lab, tgt_lab)))
+            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, S_enc), tf) * 100.0
+            scores[name] = float(np.mean(np.linalg.norm(out_ok - tgt_ok, axis=-1)))
     elif nctx is not None:
         # AI available: judge each candidate by how well it matches the reference
         # REGION BY REGION (sky↔sky, skin↔skin) — the cross-scene accuracy that a
@@ -205,11 +225,11 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         for name, lut in luts.items():
             scores[name] = nctx.semantic_distance(apply_lut_points(lut, Sf_enc), idx)
     else:
-        metric = "sliced-Wasserstein (Lab)"
-        tgt_lab = cs.encoded_to_lab(Tf_enc, tf)
+        metric = "sliced-Wasserstein (Oklab)"
+        tgt_ok = cs.encoded_to_oklab(Tf_enc, tf) * 100.0
         for name, lut in luts.items():
-            out_lab = cs.encoded_to_lab(apply_lut_points(lut, Sf_enc), tf)
-            scores[name] = sliced_wasserstein(out_lab, tgt_lab, seed=seed)
+            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, Sf_enc), tf) * 100.0
+            scores[name] = sliced_wasserstein(out_ok, tgt_ok, seed=seed)
 
     # Steepness penalty: a candidate that "wins" the distance metric with 10x+
     # local slopes ships visible damage — steep segments turn 8-bit and H.264
@@ -262,6 +282,16 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         # the shipping LUT still has posterising slopes, soften it toward the
         # smooth capped-MKL just enough to get under the visible-damage line.
         res.lut = steep_guard(res.lut, luts["mkl"])
+        # Keep the top runner-up candidates (same guards) so the panel can offer
+        # them as alternative looks. Winner goes first under its own name.
+        res.alts[res.method] = res.lut.astype(np.float32)
+        for name in sorted(scores, key=scores.get):
+            if len(res.alts) >= 3:
+                break
+            if name in res.alts or name == best:
+                continue
+            alt = steep_guard(gamut_guard(luts[name], Sf_enc, luts["mkl"]), luts["mkl"])
+            res.alts[name] = alt.astype(np.float32)
 
     if corresponded and src_enc.shape == tgt_enc.shape:
         de_b = image_delta_e00(src_enc, tgt_enc, tf)

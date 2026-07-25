@@ -91,6 +91,16 @@
 
     #preview { margin-top: 12px; }
     #preview.hidden { display: none; }
+    #alts { margin-top: 8px; display: flex; gap: 6px; }
+    #alts.hidden { display: none; }
+    .alt { flex: 1; cursor: pointer; border: 1px solid #3d3d3d; border-radius: 4px;
+           overflow: hidden; background: #161617; }
+    .alt img { width: 100%; display: block; }
+    .alt .alt-name { font-size: 9px; letter-spacing: 0.04em; color: #9a9a9e;
+           padding: 3px 4px 4px; text-transform: uppercase; text-align: center;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .alt.selected { border-color: #1473e6; }
+    .alt.selected .alt-name { color: #d9d9de; }
     #preview img { width: 100%; border-radius: 4px; border: 1px solid #3d3d3d; display: block; }
 
     .footer {
@@ -176,6 +186,7 @@
   </div>
 
   <div id="preview" class="hidden"><img id="preview-img" src="" alt="before / after" /></div>
+  <div id="alts" class="hidden"></div>
 
   <div class="footer">
     <span class="brand">colourMatik</span><span class="dot">&middot;</span>by Sevki Bugra Ozbek<span class="dot">&middot;</span><span id="site-link">catheadai.com</span>

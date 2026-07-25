@@ -87,13 +87,46 @@ def steep_guard(lut: np.ndarray, fallback: np.ndarray, cap: float = 6.0) -> np.n
     return out
 
 
+def soft_gamut(lin: np.ndarray) -> np.ndarray:
+    """Hue-preserving gamut mapping for out-of-range LINEAR sRGB values.
+
+    A hard per-channel clip at the cube edge visibly distorts hue (a too-bright
+    warm highlight clips to yellow; deep saturated blues clip cyan-ward). Instead,
+    out-of-gamut colours keep their Oklab hue and lightness while their CHROMA is
+    bisected down to the gamut surface — Ottosson's constant-hue projection, the
+    recipe CSS Color 4 standardised. In-gamut values pass through untouched."""
+    from .colorspace import linear_to_oklab, oklab_to_linear
+    lin = np.asarray(lin, dtype=np.float64)
+    flat = lin.reshape(-1, 3)
+    eps = 1e-6
+    oog = np.any((flat < -eps) | (flat > 1.0 + eps), axis=-1)
+    if not oog.any():
+        return np.clip(lin, 0.0, 1.0)
+    bad = flat[oog]
+    lab = linear_to_oklab(np.clip(bad, 0.0, None))
+    L = np.clip(lab[:, :1], 0.0, 1.0)
+    ab = lab[:, 1:]
+    lo = np.zeros((bad.shape[0], 1))
+    hi = np.ones((bad.shape[0], 1))
+    for _ in range(9):                    # bisect the largest in-gamut chroma
+        mid = (lo + hi) / 2.0
+        cand = oklab_to_linear(np.concatenate([L, ab * mid], axis=1))
+        inside = np.all((cand > -1e-4) & (cand < 1.0 + 1e-4), axis=1, keepdims=True)
+        lo = np.where(inside, mid, lo)
+        hi = np.where(inside, hi, mid)
+    mapped = oklab_to_linear(np.concatenate([L, ab * lo], axis=1))
+    out = np.clip(flat, 0.0, 1.0)
+    out[oog] = np.clip(mapped, 0.0, 1.0)
+    return out.reshape(lin.shape)
+
+
 def build_lut(transform_lin, size: int = 65, tf: str = "sRGB") -> np.ndarray:
     """Sample `transform_lin` on an encoded grid -> LUT array indexed [r, g, b, 3]."""
     axis = np.linspace(0.0, 1.0, size)
     R, G, B = np.meshgrid(axis, axis, axis, indexing="ij")  # [r,g,b]
     enc_in = np.stack([R, G, B], axis=-1).reshape(-1, 3)
     lin_in = decode(enc_in, tf)
-    lin_out = np.clip(transform_lin(lin_in), 0.0, None)
+    lin_out = soft_gamut(transform_lin(lin_in))   # hue-preserving, not a hard clip
     enc_out = np.clip(encode(lin_out, tf), 0.0, 1.0)
     return enc_out.reshape(size, size, size, 3)
 

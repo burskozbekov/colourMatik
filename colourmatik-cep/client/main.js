@@ -173,6 +173,7 @@ async function run() {
   };
   $("run").disabled = true;
   $("preview").className = "hidden";
+  $("alts").className = "hidden"; $("alts").innerHTML = "";
   state.slot = null;
   $("intensity-section").className = "section hidden";
   setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
@@ -205,6 +206,8 @@ async function run() {
       $("intensity-section").className = "section";
       $("intensity").value = DEFAULT_INTENSITY;
       $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
+      state.lastTgt = tgt;              // alt-look clicks re-apply to THIS layer
+      loadAlts(j.rid, tgt, gen);        // clickable alternative looks
     }
 
     var label = j.method_label || j.method || "";
@@ -225,6 +228,41 @@ async function run() {
     _running = false;
     if (gen === _runGen) { if (!ok) stopProgress(false); refreshRun(); }
   }
+}
+
+/* ---- Alternative looks: the contest's top candidates, clickable ----------- */
+async function loadAlts(rid, tgt, gen) {
+  try {
+    var j = await getJSON("/alts/" + rid, 20000);
+    if (!j || !j.ok || !j.alts || j.alts.length < 2) return;
+    if (gen !== _runGen) return;
+    var box = $("alts");
+    box.innerHTML = "";
+    j.alts.forEach(function (a) {
+      var d = document.createElement("div");
+      d.className = "alt" + (a.chosen ? " selected" : "");
+      d.innerHTML = '<img src="' + a.preview + '"><div class="alt-name">' + a.label + "</div>";
+      d.addEventListener("click", async function () {
+        if (gen !== _runGen) return;
+        try {
+          var ej = await postJSON("/effect_lut", { rid: rid, variant: a.key }, 30000);
+          if (!ej || !ej.ok) throw new Error((ej && ej.error) || "variant failed");
+          state.slot = ej.slot;
+          var pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
+          var ap = await evalHost("cm_apply(" + parseInt(ej.slot, 10) + ", " + pct + ", " +
+            (tgt.idx || 0) + ", " + (tgt.compId || 0) + ", " + jsArg(tgt.name) + ")");
+          if (!ap.ok) throw new Error(ap.message || "apply failed");
+          for (var i = 0; i < box.children.length; i++) box.children[i].className = "alt";
+          d.className = "alt selected";
+          setStatus("DONE", "Look switched to " + a.label + ".", "done");
+        } catch (e) {
+          setStatus("ERROR", "Couldn't switch look: " + (e.message || e), "error");
+        }
+      });
+      box.appendChild(d);
+    });
+    box.className = "";
+  } catch (e) {}
 }
 
 /* ---- Intensity: live re-set of the effect param --------------------------- */
