@@ -31,6 +31,26 @@ from .viz import make_comparison
 from .metrics import image_delta_e00, summarize
 
 app = FastAPI(title="colourMatik")
+
+
+@app.on_event("startup")
+def _warm_ai_models():
+    """Fetch/load the AI models in the BACKGROUND right after the engine starts.
+    EoMT (~1.2GB) and ModFlows (~170MB) download once per machine; without this
+    the user's FIRST match silently pays that download and the progress bar
+    looks frozen for minutes ("stuck at 67%")."""
+    def _warm():
+        try:
+            from . import neural as _nn
+            _nn.available()
+        except Exception:
+            pass
+        try:
+            from . import modflows as _mf
+            _mf.available()
+        except Exception:
+            pass
+    threading.Thread(target=_warm, daemon=True).start()
 # UXP panels (and any local caller) fetch this server cross-origin.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])

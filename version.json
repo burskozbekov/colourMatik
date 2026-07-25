@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
+  "version": "1.4.2",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.4.1 — updates now run entirely inside the panel with a live progress bar: no Terminal, no browser, no GitHub, on both macOS and Windows."
+  "notes": "colourMatik 1.4.2 — slider values are clean integers (UXP float leak fixed) and the AI models pre-download in the background at engine start, so the first match never looks frozen."
 }

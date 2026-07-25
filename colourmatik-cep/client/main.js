@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.4.1";
+var LOCAL_VERSION = "1.4.2";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -364,7 +364,7 @@ function resetAxes() {
 }
 function onAxis() {
   ["wb", "tone", "color"].forEach(function (k) {
-    $("ax-" + k + "-val").textContent = $("ax-" + k).value;
+    $("ax-" + k + "-val").textContent = String(Math.round(parseFloat($("ax-" + k).value) || 100));
   });
   if (axesTimer) clearTimeout(axesTimer);
   axesTimer = setTimeout(applyAxes, 300);
@@ -373,9 +373,9 @@ async function applyAxes() {
   if (!state.rid || state.slot == null || !state.lastTgt) return;
   try {
     var body = { rid: state.rid,
-      wb: (parseInt($("ax-wb").value, 10) || 100) / 100,
-      tone: (parseInt($("ax-tone").value, 10) || 100) / 100,
-      color: (parseInt($("ax-color").value, 10) || 100) / 100 };
+      wb: Math.round(parseFloat($("ax-wb").value) || 100) / 100,
+      tone: Math.round(parseFloat($("ax-tone").value) || 100) / 100,
+      color: Math.round(parseFloat($("ax-color").value) || 100) / 100 };
     var j = await postJSON("/effect_lut", body, 30000);
     if (!j || !j.ok) throw new Error((j && j.error) || "strength failed");
     state.slot = j.slot;

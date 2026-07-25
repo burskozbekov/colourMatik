@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.4.1";
+const LOCAL_VERSION = "1.4.2";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -599,7 +599,7 @@ function resetAxes() {
 }
 function onAxis() {
   for (const k of ["wb", "tone", "color"])
-    $("ax-" + k + "-val").textContent = $("ax-" + k).value;
+    $("ax-" + k + "-val").textContent = String(Math.round(parseFloat($("ax-" + k).value) || 100));
   if (axesTimer) clearTimeout(axesTimer);
   axesTimer = setTimeout(applyAxes, 300);
 }
@@ -607,9 +607,9 @@ async function applyAxes() {
   if (!state.rid || state.slot == null) return;
   try {
     const body = { rid: state.rid,
-      wb: (parseInt($("ax-wb").value, 10) || 100) / 100,
-      tone: (parseInt($("ax-tone").value, 10) || 100) / 100,
-      color: (parseInt($("ax-color").value, 10) || 100) / 100 };
+      wb: Math.round(parseFloat($("ax-wb").value) || 100) / 100,
+      tone: Math.round(parseFloat($("ax-tone").value) || 100) / 100,
+      color: Math.round(parseFloat($("ax-color").value) || 100) / 100 };
     const r = await fetchT(SERVER + "/effect_lut", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, 30000);
     const j = await r.json();

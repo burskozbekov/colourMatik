@@ -71,7 +71,7 @@
     #intensity-section.hidden { display: none; }
     #axes { display: flex; gap: 8px; margin-top: 8px; }
     .axis { flex: 1; }
-    .axis-name { display: block; font-size: 9px; letter-spacing: 0.06em;
+    .axis-name { display: block; white-space: nowrap; overflow: hidden; font-size: 9px; letter-spacing: 0.06em;
                  color: #8a8a8e; margin-bottom: 2px; }
     .axis-name b { float: right; font-weight: 500; color: #b9b9be; }
     .axis input[type="range"] { width: 100%; margin: 0; }
@@ -225,14 +225,14 @@
       <span class="field-label" style="margin: 0;">INTENSITY</span>
       <span class="intensity-val" id="intensity-val">100%</span>
     </div>
-    <input type="range" id="intensity" min="0" max="200" value="100" />
+    <input type="range" id="intensity" min="0" max="200" value="100" step="1" />
     <div id="axes">
       <div class="axis"><span class="axis-name">WB <b id="ax-wb-val">100</b></span>
-        <input type="range" id="ax-wb" min="0" max="150" value="100" /></div>
+        <input type="range" id="ax-wb" min="0" max="150" value="100" step="1" /></div>
       <div class="axis"><span class="axis-name">TONE <b id="ax-tone-val">100</b></span>
-        <input type="range" id="ax-tone" min="0" max="150" value="100" /></div>
+        <input type="range" id="ax-tone" min="0" max="150" value="100" step="1" /></div>
       <div class="axis"><span class="axis-name">COLOR <b id="ax-color-val">100</b></span>
-        <input type="range" id="ax-color" min="0" max="150" value="100" /></div>
+        <input type="range" id="ax-color" min="0" max="150" value="100" step="1" /></div>
     </div>
   </div>
 
