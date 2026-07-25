@@ -29,9 +29,17 @@ fi
 
 prog 25 "Refreshing the engine"
 echo "${B}==> Refreshing engine + AI...${N}";  ./setup.sh
-prog 75 "Reinstalling the panel"
+prog 75 "Reinstalling the panels"
 echo "${B}==> Reinstalling panel + effect...${N}"
 ./install-panel.sh  >/dev/null 2>&1 || true
+# The AE (CEP) panel is per-user — refresh it DIRECTLY. install-effect.sh also
+# copies it, but that script needs sudo for the effect first and a silent
+# background run has no way to ask for a password, so it can bail before the
+# CEP step; this guarantees the panel never stays stale.
+CEPDEST="$HOME/Library/Application Support/Adobe/CEP/extensions/com.catheadai.colourmatik"
+if [ -d colourmatik-cep ]; then
+  mkdir -p "$CEPDEST" && cp -R colourmatik-cep/. "$CEPDEST"/ 2>/dev/null || true
+fi
 prog 85 "Reinstalling the effect"
 ./install-effect.sh || true
 prog 96 "Restarting the engine"
