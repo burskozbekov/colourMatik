@@ -15,11 +15,31 @@ _TF = {
     "sRGB": "sRGB",
     "Rec709": "ITU-R BT.709",
     "BT1886": "ITU-R BT.1886",
+    # Camera log curves (published formulas, implemented by colour-science).
+    # Matching log-to-log keeps the LUT in the log domain, so the user's own
+    # downstream log->display conversion still applies untouched.
+    "SLog3": "S-Log3",
+    "CLog3": "Canon Log 3",
+    "VLog": "V-Log",
+    "Log3G10": "Log3G10",
+    "AppleLog": "Apple Log Profile",
+    "LogC3": "ARRI LogC3",
+    "LogC4": "ARRI LogC4",
 }
 
 
 def resolve_tf(name: str) -> str:
     return _TF.get(name, name)
+
+
+_DISPLAY_TFS = {"sRGB", "Rec709", "BT1886"}
+
+
+def is_display_tf(name: str) -> bool:
+    """True for display-referred curves, where linear [0,1] IS the gamut. Camera
+    log curves are scene-referred: linear values far above 1.0 are legitimate
+    highlights, so display-gamut mapping must not touch them."""
+    return name in _DISPLAY_TFS or resolve_tf(name) in ("sRGB", "ITU-R BT.709", "ITU-R BT.1886")
 
 
 def decode(enc: np.ndarray, tf: str = "sRGB") -> np.ndarray:

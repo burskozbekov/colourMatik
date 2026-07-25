@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.3.0";
+var LOCAL_VERSION = "1.4.0";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -187,7 +187,7 @@ async function run() {
   try {
     var dj = await postJSON("/match_paths", {
       source_path: tgt.srcPath, reference_path: tgt.refPath,
-      mode: currentMode(), tf: "sRGB", frames: 3, look: currentLook(), fast: true
+      mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 3, look: currentLook(), fast: true
     }, 45000);
     if (dj && dj.ok && gen === _runGen) {
       var de = await postJSON("/effect_lut", { rid: dj.rid }, 15000);
@@ -205,7 +205,7 @@ async function run() {
     try {
       j = await postJSON("/match_paths", {
         source_path: tgt.srcPath, reference_path: tgt.refPath,
-        mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(), job_id: jobId
+        mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 7, look: currentLook(), job_id: jobId
       }, 300000);
     } catch (netErr) { throw new Error(String(netErr.message || netErr)); }
     if (!j || !j.ok) throw new Error((j && j.error) || "match failed");

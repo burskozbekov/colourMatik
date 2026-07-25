@@ -139,6 +139,13 @@
     .footer .dot { margin: 0 5px; color: #555555; }
     .footer-meta { margin-top: 4px; }
     #site-link, #update-link { color: #4ea1f7; cursor: pointer; }
+    #tf { width: 100%; background: #262627; color: #d9d9de; border: 1px solid #3d3d3d;
+          border-radius: 4px; padding: 5px 6px; font-size: 11px; }
+    .secondary { width: 100%; margin-top: 6px; background: #2b2b2c; color: #c9c9ce;
+                 border: 1px solid #3d3d3d; border-radius: 6px; padding: 8px 0;
+                 font-size: 11px; letter-spacing: 0.06em; cursor: pointer; }
+    .secondary:disabled { opacity: 0.45; cursor: default; }
+    .secondary:hover:not(:disabled) { border-color: #1473e6; }
   </style>
 </head>
 <body>
@@ -198,10 +205,25 @@
     </div>
   </div>
 
+  <div class="section" style="margin-top: 10px;">
+    <span class="field-label">INPUT FORMAT &mdash; BOTH CLIPS</span>
+    <select id="tf">
+      <option value="sRGB" selected>Standard (Rec.709 / sRGB)</option>
+      <option value="SLog3">Sony S-Log3</option>
+      <option value="CLog3">Canon Log 3</option>
+      <option value="VLog">Panasonic V-Log</option>
+      <option value="Log3G10">RED Log3G10</option>
+      <option value="AppleLog">Apple Log</option>
+      <option value="LogC3">ARRI LogC3</option>
+      <option value="LogC4">ARRI LogC4</option>
+    </select>
+  </div>
+
   <button class="primary" id="run" disabled>
     <span id="run-fill"></span>
     <span id="run-label">MATCH &amp; APPLY</span>
   </button>
+  <button class="secondary" id="run-all" disabled title="Match every clip on the timeline to the reference — similar shots share one LUT">MATCH ALL CLIPS</button>
 
   <div id="intensity-section" class="section hidden" style="margin-top: 14px;">
     <div class="intensity-head">

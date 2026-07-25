@@ -621,6 +621,56 @@ def library_del(req: LibDelReq):
     return {"ok": True}
 
 
+class GroupShotsReq(BaseModel):
+    items: list          # [{id, path, in?, out?}] — one timeline clip each
+
+
+@app.post("/group_shots")
+def group_shots(req: GroupShotsReq):
+    """Cluster timeline clips by LOOK so MATCH ALL can fit ONE correction per
+    group — same-setup shots share a LUT (no grade 'pops' at A/B/A cuts), and a
+    60-clip timeline needs a handful of matches, not sixty."""
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        items = list(req.items)[:60]
+
+        def sig(it):
+            try:
+                lo = it.get("in"); hi = it.get("out")
+                mid = None
+                if lo is not None and hi is not None and hi > lo:
+                    mid = lo + (hi - lo) / 2.0
+                frame = cmio.load_any(it["path"], t=mid, frames=1)
+                small = frame[::max(1, frame.shape[0] // 72),
+                              ::max(1, frame.shape[1] // 128)]
+                h, _ = np.histogramdd(small.reshape(-1, 3), bins=(8, 8, 8),
+                                      range=((0, 1),) * 3)
+                h = h.ravel(); h = h / (h.sum() or 1.0)
+                return it["id"], h
+            except Exception:
+                return it["id"], None
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            sigs = dict(ex.map(sig, items))
+
+        ids = [it["id"] for it in items if sigs.get(it["id"]) is not None]
+        failed = [it["id"] for it in items if sigs.get(it["id"]) is None]
+        groups: list[list] = []
+        THRESH = 0.55            # L1 distance between 8^3 histograms (0..2)
+        for cid in ids:
+            placed = False
+            for g in groups:
+                d = float(np.abs(sigs[cid] - sigs[g[0]]).sum())
+                if d < THRESH:
+                    g.append(cid); placed = True; break
+            if not placed:
+                groups.append([cid])
+        return {"ok": True, "groups": groups, "failed": failed}
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
 @app.get("/version")
 def version():
     return {"name": "colourMatik", "version": __version__}

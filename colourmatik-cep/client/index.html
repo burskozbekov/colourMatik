@@ -140,6 +140,8 @@
     .footer .dot { margin: 0 5px; color: #555555; }
     .footer-meta { margin-top: 4px; }
     #site-link, #update-link { color: #4ea1f7; cursor: pointer; }
+    #tf { width: 100%; background: #262627; color: #d9d9de; border: 1px solid #3d3d3d;
+          border-radius: 4px; padding: 5px 6px; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -197,6 +199,20 @@
       <div class="seg-btn selected" id="look-exact">Accurate</div>
       <div class="seg-btn" id="look-ai">Cinematic AI</div>
     </div>
+  </div>
+
+  <div class="section" style="margin-top: 10px;">
+    <span class="field-label">INPUT FORMAT &mdash; BOTH CLIPS</span>
+    <select id="tf">
+      <option value="sRGB" selected>Standard (Rec.709 / sRGB)</option>
+      <option value="SLog3">Sony S-Log3</option>
+      <option value="CLog3">Canon Log 3</option>
+      <option value="VLog">Panasonic V-Log</option>
+      <option value="Log3G10">RED Log3G10</option>
+      <option value="AppleLog">Apple Log</option>
+      <option value="LogC3">ARRI LogC3</option>
+      <option value="LogC4">ARRI LogC4</option>
+    </select>
   </div>
 
   <button class="primary" id="run" disabled>

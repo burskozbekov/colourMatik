@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.3.0";
+const LOCAL_VERSION = "1.4.0";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -43,6 +43,7 @@ function currentLook() {
 
 function refreshRun() {
   $("run").disabled = !(state.refPath && state.srcPath);
+  try { refreshRunAll(); } catch (e) {}
 }
 
 /* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
@@ -259,7 +260,7 @@ async function run() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source_path: tgt.srcPath, reference_path: tgt.refPath,
-        mode: currentMode(), tf: "sRGB", frames: 3, look: currentLook(),
+        mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 3, look: currentLook(),
         source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
         reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
         fast: true,
@@ -288,7 +289,7 @@ async function run() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_path: tgt.srcPath, reference_path: tgt.refPath,
-          mode: currentMode(), tf: "sRGB", frames: 7, look: currentLook(),
+          mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 7, look: currentLook(),
           source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
           reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
           job_id: jobId,
@@ -446,6 +447,106 @@ async function loadWipe(rid, gen) {
       wrap.addEventListener("pointerup", () => { wrap._drag = false; });
     }
   } catch (e) {}
+}
+
+/* ---- MATCH ALL: every clip on the timeline, grouped, one LUT per group ---- */
+let _matchingAll = false;
+function refreshRunAll() { $("run-all").disabled = !(state.refPath) || _matchingAll; }
+async function getAllVideoClips() {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No project is open.");
+  const seq = await project.getActiveSequence();
+  if (!seq) throw new Error("Open a sequence first.");
+  const clips = [];
+  let trackCount = 0;
+  try { trackCount = await seq.getVideoTrackCount(); } catch (e) { trackCount = 0; }
+  for (let ti = 0; ti < trackCount; ti++) {
+    let track = null;
+    try { track = await seq.getVideoTrack(ti); } catch (e) { continue; }
+    if (!track) continue;
+    let items = [];
+    try {
+      if (typeof track.getTrackItems === "function") {
+        // 1 = CLIP track items; second arg: include empty
+        items = await track.getTrackItems(1, false);
+      }
+    } catch (e) { items = []; }
+    for (const c of items || []) {
+      try {
+        if (typeof c.getComponentChain !== "function") continue;   // not a video clip
+        const pi = await c.getProjectItem();
+        const clip = ppro.ClipProjectItem.cast(pi);
+        const p = clip ? await clip.getMediaFilePath() : null;
+        if (!p) continue;
+        let inS = null, outS = null;
+        try {
+          const a = await c.getInPoint(); const b = await c.getOutPoint();
+          if (a && isFinite(a.seconds)) inS = a.seconds;
+          if (b && isFinite(b.seconds)) outS = b.seconds;
+        } catch (e) {}
+        clips.push({ id: clips.length, path: p, inS, outS, trackItem: c });
+      } catch (e) {}
+    }
+  }
+  return clips;
+}
+async function matchAll() {
+  if (_matchingAll) return;
+  if (!state.refPath) return setStatus("SELECT", "Pick a REFERENCE first.", "error");
+  _matchingAll = true; refreshRunAll();
+  const btn = $("run-all");
+  try {
+    setStatus("SCAN", "Reading the timeline…", "busy");
+    const clips = await getAllVideoClips();
+    if (!clips.length) throw new Error("No video clips found on the active sequence (this needs Premiere's 2026 UXP timeline API).");
+    btn.textContent = "GROUPING " + clips.length + " CLIPS…";
+    const gr = await fetchT(SERVER + "/group_shots", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: clips.map(c => ({ id: c.id, path: c.path, "in": c.inS, "out": c.outS })) }) }, 120000);
+    const gj = await gr.json();
+    if (!gj.ok) throw new Error(gj.error || "grouping failed");
+    const groups = gj.groups;
+    let done = 0, applied = 0;
+    for (const g of groups) {
+      done++;
+      btn.textContent = "MATCHING GROUP " + done + "/" + groups.length + "…";
+      setStatus("MATCH ALL", "Group " + done + "/" + groups.length + " (" + g.length + " clip" + (g.length > 1 ? "s" : "") + ")…", "busy");
+      // longest member represents the group
+      const members = g.map(id => clips[id]).filter(Boolean);
+      if (!members.length) continue;
+      let rep = members[0];
+      for (const m of members)
+        if ((m.outS || 0) - (m.inS || 0) > (rep.outS || 0) - (rep.inS || 0)) rep = m;
+      try {
+        const mr = await fetchT(SERVER + "/match_paths", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_path: rep.path, reference_path: state.refPath,
+            mode: "different", tf: ($("tf") && $("tf").value) || "sRGB",
+            frames: 7, look: currentLook(),
+            source_in: rep.inS, source_out: rep.outS,
+            reference_in: state.refIn, reference_out: state.refOut,
+          }) }, 300000);
+        const mj = await mr.json();
+        if (!mj.ok) continue;
+        const er = await fetchT(SERVER + "/effect_lut", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rid: mj.rid }) }, 30000);
+        const ej = await er.json();
+        if (!ej.ok) continue;
+        for (const m of members) {
+          try { await applyEffect(m.trackItem, ej.slot, DEFAULT_INTENSITY); applied++; } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    setStatus("DONE", "Matched " + applied + "/" + clips.length + " clips in " + groups.length + " groups — same-look shots share one LUT (no pops at cuts).", "done");
+  } catch (e) {
+    setStatus("ERROR", String(e.message || e), "error");
+  } finally {
+    _matchingAll = false;
+    btn.textContent = "MATCH ALL CLIPS";
+    refreshRunAll();
+  }
 }
 
 /* ---- Alternative looks: the contest's top candidates, clickable ----------- */
@@ -608,6 +709,7 @@ $("run").addEventListener("click", run);
 $("intensity").addEventListener("input", onIntensity);
 for (const k of ["wb", "tone", "color"]) $("ax-" + k).addEventListener("input", onAxis);
 $("lib-save").addEventListener("click", saveRefToLibrary);
+$("run-all").addEventListener("click", matchAll);
 loadLibrary();
 $("site-link").addEventListener("click", () => openUrl(SITE_URL));
 $("update-link").addEventListener("click", checkForUpdates);

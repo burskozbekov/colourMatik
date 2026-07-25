@@ -137,7 +137,10 @@ def decompose_residual(winner_lut: np.ndarray, gains, curves,
     grid = np.stack([Rg, Gg, Bg], -1).reshape(-1, 3)
     lin = decode(grid, tf)
     x_lin = _invert_wb_tone(lin, gains, curves)
-    x_enc = np.clip(encode(np.clip(x_lin, 0.0, None), tf), 0.0, 1.0)
+    from .colorspace import is_display_tf
+    if is_display_tf(tf):
+        x_lin = np.clip(x_lin, 0.0, None)
+    x_enc = np.clip(encode(x_lin, tf), 0.0, 1.0)
     vals = apply_lut_points(winner_lut, x_enc)
     return np.clip(vals, 0.0, 1.0).reshape(size, size, size, 3)
 
@@ -150,7 +153,10 @@ def recompose_lut(gains, curves, resid: np.ndarray, s_wb: float, s_tone: float,
     grid = np.stack([Rg, Gg, Bg], -1).reshape(-1, 3)
     lin = decode(grid, tf)
     lin2 = apply_wb_tone(lin, gains, curves, s_wb=s_wb, s_tone=s_tone)
-    enc2 = np.clip(encode(soft_gamut(lin2), tf), 0.0, 1.0)
+    from .colorspace import is_display_tf
+    if is_display_tf(tf):
+        lin2 = soft_gamut(lin2)
+    enc2 = np.clip(encode(lin2, tf), 0.0, 1.0)
     Rs = apply_intensity(np.asarray(resid, dtype=np.float64), float(s_color))
     out = apply_lut_points(Rs, enc2)
     return np.clip(out, 0.0, 1.0).reshape(size, size, size, 3)
@@ -234,7 +240,12 @@ def build_lut(transform_lin, size: int = 65, tf: str = "sRGB") -> np.ndarray:
     R, G, B = np.meshgrid(axis, axis, axis, indexing="ij")  # [r,g,b]
     enc_in = np.stack([R, G, B], axis=-1).reshape(-1, 3)
     lin_in = decode(enc_in, tf)
-    lin_out = soft_gamut(transform_lin(lin_in))   # hue-preserving, not a hard clip
+    lin_out = np.nan_to_num(transform_lin(lin_in))
+    from .colorspace import is_display_tf
+    if is_display_tf(tf):
+        lin_out = soft_gamut(lin_out)             # hue-preserving, not a hard clip
+    # scene-referred log: linear values outside [0,1] (even slightly negative)
+    # are real data the log ENCODING itself maps back into [0,1] — no clipping.
     enc_out = np.clip(encode(lin_out, tf), 0.0, 1.0)
     return enc_out.reshape(size, size, size, 3)
 
