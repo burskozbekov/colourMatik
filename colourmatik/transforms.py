@@ -118,11 +118,24 @@ def fit_sep(src_lin: np.ndarray, tgt_lin: np.ndarray):
         yq = np.quantile(tgt_lin[:, c], qs)
         xq = np.maximum.accumulate(xq) + np.arange(33) * 1e-9  # strictly increasing
         yq = np.maximum.accumulate(yq)
-        # linear extension beyond the observed range, with SANE slopes (a curve
-        # fitted on 1..99% quantiles says nothing about far highlights; an
-        # unbounded edge slope would re-create the extrapolation blow-up)
-        lo_m = np.clip((yq[1] - yq[0]) / max(xq[1] - xq[0], 1e-9), 0.0, 6.0)
-        hi_m = np.clip((yq[-1] - yq[-2]) / max(xq[-1] - xq[-2], 1e-9), 0.0, 6.0)
+        # Cap the curve's LOCAL slope everywhere. Exact quantile matching between
+        # a NARROW source and a WIDE target demands huge per-segment stretches
+        # (measured 14-32x on a dark cold shot matched to a broad reference) —
+        # each such segment amplifies 8-bit / macroblock steps into posterised
+        # patches. Rebuild the curve from slopes clipped to [0.2, 5], anchored at
+        # the median so midtones stay exactly matched.
+        sl = np.clip(np.diff(yq) / np.maximum(np.diff(xq), 1e-9), 0.2, 5.0)
+        mid = 16
+        y2 = np.empty_like(yq)
+        y2[mid] = yq[mid]
+        for i in range(mid, 0, -1):
+            y2[i - 1] = y2[i] - sl[i - 1] * (xq[i] - xq[i - 1])
+        for i in range(mid, 32):
+            y2[i + 1] = y2[i] + sl[i] * (xq[i + 1] - xq[i])
+        yq = y2
+        # linear extension beyond the observed range, same sane slope bound
+        lo_m = np.clip((yq[1] - yq[0]) / max(xq[1] - xq[0], 1e-9), 0.0, 5.0)
+        hi_m = np.clip((yq[-1] - yq[-2]) / max(xq[-1] - xq[-2], 1e-9), 0.0, 5.0)
         curves.append((xq, yq, lo_m, hi_m))
 
     def apply_curves(x):

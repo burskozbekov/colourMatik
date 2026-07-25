@@ -48,6 +48,45 @@ def gamut_guard(lut: np.ndarray, samples_enc: np.ndarray,
     return w * lut + (1.0 - w) * fallback
 
 
+def lut_steepness(lut: np.ndarray, pct: float = 99.5) -> float:
+    """The LUT's near-worst LOCAL slope (unitless; identity = 1).
+
+    Steepness is what turns a match into visible damage on real footage: any
+    segment steeper than ~6x stretches 8-bit quantisation and H.264 macroblock
+    steps into hard posterised patches. Natural grades sit under ~3x."""
+    size = lut.shape[0]
+    mx = []
+    for ax in range(3):
+        d = np.abs(np.diff(lut, axis=ax)) * (size - 1)
+        mx.append(d.max(axis=-1).ravel())
+    return float(np.percentile(np.concatenate(mx), pct))
+
+
+def steep_guard(lut: np.ndarray, fallback: np.ndarray, cap: float = 6.0) -> np.ndarray:
+    """Emergency brake: SMOOTH the LUT until its near-worst local slope is under
+    `cap`. A no-op for every sane match; only an exact-distribution map between a
+    narrow and a wide distribution (the posterisation failure) gets softened.
+
+    Smoothing (not blending away) is the transport-map regularisation the colour
+    OT literature prescribes: it keeps the grade's structure and only shaves the
+    local spikes that turn 8-bit / macroblock steps into posterised patches. If
+    even repeated smoothing can't tame it, fall back to blending toward the
+    smooth capped-MKL as a last resort."""
+    from scipy.ndimage import gaussian_filter
+    out = lut
+    for _ in range(4):
+        if lut_steepness(out) <= cap:
+            return out
+        out = np.stack([gaussian_filter(out[..., c], sigma=1.0, mode="nearest")
+                        for c in range(3)], axis=-1)
+    sa = lut_steepness(out)
+    if sa > cap * 1.5:
+        sb = lut_steepness(fallback)
+        t = float(np.clip((cap - sb) / max(sa - sb, 1e-9), 0.0, 1.0))
+        out = t * out + (1.0 - t) * fallback
+    return out
+
+
 def build_lut(transform_lin, size: int = 65, tf: str = "sRGB") -> np.ndarray:
     """Sample `transform_lin` on an encoded grid -> LUT array indexed [r, g, b, 3]."""
     axis = np.linspace(0.0, 1.0, size)

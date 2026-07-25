@@ -13,7 +13,8 @@ from . import colorspace as cs
 from . import transforms as tf_mod
 from .metrics import (delta_e00, image_delta_e00, sliced_wasserstein,
                       summarize, verdict)
-from .lut import build_lut, apply_lut, apply_lut_points, resample_lut, gamut_guard
+from .lut import (build_lut, apply_lut, apply_lut_points, resample_lut,
+                  gamut_guard, lut_steepness, steep_guard)
 from .skin import skin_probability, skin_mask
 
 
@@ -85,6 +86,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
                                                cs.decode(_Te[_ti], tf)),
                                 size=size, tf=tf)
                 lut = gamut_guard(lut, _Se[_si], _fb)
+                lut = steep_guard(lut, _fb)
             except Exception:
                 pass
             res = MatchResult(method="canon", scores={"canon": 0.0}, lut=lut, tf=tf,
@@ -209,6 +211,15 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             out_lab = cs.encoded_to_lab(apply_lut_points(lut, Sf_enc), tf)
             scores[name] = sliced_wasserstein(out_lab, tgt_lab, seed=seed)
 
+    # Steepness penalty: a candidate that "wins" the distance metric with 10x+
+    # local slopes ships visible damage — steep segments turn 8-bit and H.264
+    # macroblock steps into posterised patches on real footage. Multiplicative,
+    # so it is scale-free across the three metrics; a steep LUT now only wins if
+    # it is MUCH more accurate than a smooth one.
+    for name in scores:
+        s = lut_steepness(luts[name])
+        scores[name] = float(scores[name]) * (1.0 + 0.15 * max(0.0, s - 4.0))
+
     best = min(scores, key=scores.get)
     res = MatchResult(method=best, scores=scores, lut=luts[best], tf=tf,
                       corresponded=corresponded, score_metric=metric)
@@ -247,6 +258,10 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     # garbage. Sampled regions are untouched, so the scores above still hold.
     if "mkl" in luts:
         res.lut = gamut_guard(res.lut, Sf_enc, luts["mkl"])
+        # Emergency brake on steepness (covers the +refine composition too): if
+        # the shipping LUT still has posterising slopes, soften it toward the
+        # smooth capped-MKL just enough to get under the visible-damage line.
+        res.lut = steep_guard(res.lut, luts["mkl"])
 
     if corresponded and src_enc.shape == tgt_enc.shape:
         de_b = image_delta_e00(src_enc, tgt_enc, tf)
