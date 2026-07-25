@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.4.1",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.4 — pickable looks (top-3 candidates as thumbnails), WB/Tone/Colour strength sliders, instant 1s draft + AI refine, reference gallery, before/after wipe, MATCH ALL timeline clips (grouped, one LUT per look — no pops at cuts), camera log support (S-Log3, C-Log3, V-Log, Log3G10, Apple Log, ARRI LogC3/C4), ModFlows neural candidate, Oklab judging, MIT-licensed segmentation (EoMT)."
+  "notes": "colourMatik 1.4.1 — updates now run entirely inside the panel with a live progress bar: no Terminal, no browser, no GitHub, on both macOS and Windows."
 }

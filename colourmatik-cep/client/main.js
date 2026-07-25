@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.4.0";
+var LOCAL_VERSION = "1.4.1";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -412,36 +412,77 @@ function semverGt(a, b) {
   return false;
 }
 var updateReady = false;   // first click checks; once found, the next click INSTALLS
-function checkForUpdates() {
-  var done = function (txt) { $("update-link").textContent = txt; };
-  if (updateReady) {
-    // Second click: actually update — the engine launches the platform updater
-    // (pulls newest code, reinstalls panel+effect, restarts itself).
-    done("Updating…");
-    postJSON("/update_now", {}, 8000).then(function (j) {
-      if (!j || !j.ok) throw new Error((j && j.error) || "update failed");
-      done("Updating — see the window");
-      setStatus("UPDATE", "Updater started in its own window (approve the admin prompt if asked). When it finishes, restart After Effects.", "busy");
-    }).catch(function () {
-      cs.openURLInDefaultBrowser(SITE_URL);   // engine too old/down — download page
-      done("Update from the site →");
-    });
-    return;
+var _updating = false;
+function _sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+/* Self-contained in-panel update: silent updater + progress file through the
+ * engine; the big button's bar is the UI. No windows, no browser, no GitHub. */
+async function runSelfUpdate(fromVersion) {
+  if (_updating) return;
+  _updating = true;
+  var el = $("update-link");
+  $("run").disabled = true;
+  $("run").classList.add("loading");
+  try {
+    var j = await postJSON("/update_now", {}, 8000);
+    if (!j || !j.ok) throw new Error((j && j.error) || "the engine couldn't start the update");
+    setStatus("UPDATE", "Updating colourMatik — the bar below tracks it. On Windows, approve the admin prompt.", "busy");
+    var t0 = Date.now();
+    var pct = 0.02, msg = "Starting";
+    while (Date.now() - t0 < 15 * 60 * 1000) {
+      await _sleep(900);
+      try {
+        var pj = await getJSON("/update_progress", 2500);
+        if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
+      } catch (e) {}
+      $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
+      el.textContent = "Updating " + Math.round(pct * 100) + "%";
+      try {
+        var vj = await getJSON("/version", 2500);
+        if (vj && vj.version && vj.version !== fromVersion) {
+          $("run-fill").style.width = "100%";
+          $("run-label").textContent = "UPDATED";
+          el.textContent = "Updated to v" + vj.version;
+          setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart After Effects to load the new panel.", "done");
+          return;
+        }
+      } catch (e) {}
+    }
+    throw new Error("timed out");
+  } catch (e) {
+    setStatus("ERROR", "Update couldn't finish: " + (e.message || e) + ". It may still be running — check again in a minute.", "error");
+    el.textContent = "Update failed — retry";
+    updateReady = true;
+  } finally {
+    _updating = false;
+    setTimeout(function () {
+      $("run").classList.remove("loading");
+      $("run-fill").style.width = "0%";
+      $("run-label").textContent = "MATCH & APPLY";
+      refreshRun();
+    }, 1500);
   }
-  done("Checking…");
+}
+function _installedVersion() {
+  return getJSON("/version", 3000).then(function (v) {
+    return (v && v.version) ? v.version : LOCAL_VERSION;
+  }).catch(function () { return LOCAL_VERSION; });
+}
+function checkForUpdates() {
+  var el = $("update-link");
+  if (_updating) return;
+  if (updateReady) { _installedVersion().then(runSelfUpdate); return; }
+  el.textContent = "Checking…";
   var doFetch = function () {
     if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
     return getJSONAbs(UPDATE_URL);
   };
-  // compare against what is actually INSTALLED (the engine's version); fall back
-  // to this panel's own version when the engine isn't running
-  getJSON("/version", 3000).catch(function () { return null; }).then(function (v) {
-    var local = (v && v.version) ? v.version : LOCAL_VERSION;
+  _installedVersion().then(function (local) {
     return doFetch().then(function (j) {
-      if (j && j.version && semverGt(j.version, local)) { done("Update v" + j.version + " — install"); updateReady = true; }
-      else done("Up to date");
+      if (j && j.version && semverGt(j.version, local)) { el.textContent = "Update v" + j.version + " — install"; updateReady = true; }
+      else el.textContent = "Up to date";
     });
-  }).catch(function () { done("Check failed"); });
+  }).catch(function () { el.textContent = "Check failed"; });
 }
 function getJSONAbs(url) {
   return new Promise(function (resolve, reject) {
@@ -483,24 +524,14 @@ try {
  * without any clicks. Runs once, at startup only, so it can never interrupt a
  * match in progress. */
 function autoUpdateCheck() {
-  var el = $("update-link");
-  getJSON("/version", 3000).catch(function () { return null; }).then(function (v) {
-    var local = (v && v.version) ? v.version : LOCAL_VERSION;
+  _installedVersion().then(function (local) {
     var doFetch = function () {
       if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
       return getJSONAbs(UPDATE_URL);
     };
     return doFetch().then(function (j) {
       if (!(j && j.version && semverGt(j.version, local))) return;
-      el.textContent = "Updating to v" + j.version + "…";
-      setStatus("UPDATE", "New version v" + j.version + " — updating automatically. Approve the admin prompt if one appears; when the updater window finishes, restart After Effects.", "busy");
-      return postJSON("/update_now", {}, 8000).then(function (uj) {
-        if (!uj || !uj.ok) throw new Error("no update endpoint");
-      }).catch(function () {   // engine too old for /update_now — arm the manual button
-        el.textContent = "Update v" + j.version + " — install";
-        updateReady = true;
-        setStatus("UPDATE", "New version v" + j.version + " available — click Update below to install.", "idle");
-      });
+      runSelfUpdate(local);   // fully automatic, fully in-panel
     });
   }).catch(function () {});
 }

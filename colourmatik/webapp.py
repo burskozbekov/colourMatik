@@ -676,6 +676,17 @@ def version():
     return {"name": "colourMatik", "version": __version__}
 
 
+@app.get("/update_progress")
+def update_progress():
+    """The updater writes "pct|message" here; the panel's bar polls it."""
+    try:
+        raw = (_SLOT_DIR / "update_progress").read_text().strip()
+        pct_s, _, msg = raw.partition("|")
+        return {"ok": True, "pct": max(0.0, min(1.0, float(pct_s) / 100.0)), "msg": msg}
+    except Exception:
+        return {"ok": True, "pct": 0.0, "msg": ""}
+
+
 @app.post("/update_now")
 def update_now():
     """Launch the platform updater, detached — the panel's Update button.
@@ -687,22 +698,29 @@ def update_now():
     import subprocess
     root = Path(__file__).resolve().parents[1]
     try:
+        # reset the progress file the updater will write ("pct|message")
+        try:
+            _SLOT_DIR.mkdir(parents=True, exist_ok=True)
+            (_SLOT_DIR / "update_progress").write_text("2|Starting the update")
+        except Exception:
+            pass
+        log = _SLOT_DIR / "update.log"
         if os.name == "nt":
             upd = root / "windows" / "update-windows.cmd"
             if not upd.exists():
                 return JSONResponse({"ok": False, "error": "updater not found"}, status_code=404)
-            subprocess.Popen(["cmd", "/c", "start", "colourMatik Update", str(upd)],
-                             cwd=str(root),
-                             creationflags=(0x00000008 | 0x00000200))  # DETACHED | NEW_PROCESS_GROUP
+            # /silent: hidden elevated window, no pause — the PANEL is the UI.
+            subprocess.Popen(["cmd", "/c", str(upd), "/silent"], cwd=str(root),
+                             creationflags=(0x00000008 | 0x00000200 | 0x08000000))
+            #                DETACHED | NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
             upd = root / "update.command"
             if not upd.exists():
                 return JSONResponse({"ok": False, "error": "updater not found"}, status_code=404)
-            try:
-                subprocess.Popen(["open", "-a", "Terminal", str(upd)])
-            except Exception:
+            # No Terminal window: the panel's own bar is the UI. Output -> log.
+            with open(log, "ab") as lf:
                 subprocess.Popen(["/bin/bash", str(upd)], cwd=str(root),
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
                                  start_new_session=True)
         return {"ok": True, "started": True, "from_version": __version__}
     except Exception as e:

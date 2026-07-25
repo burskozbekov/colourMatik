@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.4.0";
+const LOCAL_VERSION = "1.4.1";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -647,35 +647,77 @@ function semverGt(a, b) {
   return false;
 }
 async function openUrl(u) { try { await uxp.shell.openExternal(u); } catch (e) {} }
-let updateReady = false;   // first click checks; once an update is found, the next click INSTALLS it
+let updateReady = false;   // first click checks; once found, the next click INSTALLS
+let _updating = false;
+const _sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+/* Self-contained in-panel update: the engine runs the updater silently (no
+ * Terminal, no browser, no GitHub — ever) and writes progress to a file; we
+ * drive the big button's bar from it, then detect the restarted engine's new
+ * version and call it done. */
+async function runSelfUpdate(fromVersion) {
+  if (_updating) return;
+  _updating = true;
+  const el = $("update-link");
+  $("run").disabled = true;
+  $("run").classList.add("loading");
+  try {
+    const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
+    const j = await r.json().catch(() => ({ ok: false }));
+    if (!j.ok) throw new Error(j.error || "the engine couldn't start the update");
+    setStatus("UPDATE", "Updating colourMatik — the bar below tracks it. On Windows, approve the admin prompt.", "busy");
+    const t0 = Date.now();
+    let pct = 0.02, msg = "Starting";
+    while (Date.now() - t0 < 15 * 60 * 1000) {
+      await _sleep(900);
+      try {
+        const pr = await fetchT(SERVER + "/update_progress", { cache: "no-cache" }, 2500);
+        const pj = await pr.json();
+        if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
+      } catch (e) {}                     // engine restarting — keep the bar alive
+      $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
+      el.textContent = "Updating " + Math.round(pct * 100) + "%";
+      try {
+        const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 2500);
+        const vj = await vr.json();
+        if (vj && vj.version && vj.version !== fromVersion) {
+          $("run-fill").style.width = "100%";
+          $("run-label").textContent = "UPDATED";
+          el.textContent = "Updated to v" + vj.version;
+          setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart Premiere Pro to load the new panel.", "done");
+          return;
+        }
+      } catch (e) {}
+    }
+    throw new Error("timed out");
+  } catch (e) {
+    setStatus("ERROR", "Update couldn't finish: " + (e.message || e) + ". It may still be running — check again in a minute.", "error");
+    el.textContent = "Update failed — retry";
+    updateReady = true;
+  } finally {
+    _updating = false;
+    setTimeout(() => {
+      $("run").classList.remove("loading");
+      $("run-fill").style.width = "0%";
+      $("run-label").textContent = "MATCH & APPLY";
+      refreshRun();
+    }, 1500);
+  }
+}
+async function _installedVersion() {
+  try {
+    const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
+    const vj = await vr.json(); if (vj && vj.version) return vj.version;
+  } catch (e) {}
+  return LOCAL_VERSION;
+}
 async function checkForUpdates() {
   const el = $("update-link");
-  if (updateReady) {
-    // Second click: actually update — the engine launches the platform updater
-    // (pulls newest code, refreshes deps, reinstalls panel+effect, restarts itself).
-    el.textContent = "Updating…";
-    try {
-      const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
-      const j = await r.json().catch(() => ({ ok: false }));
-      if (!j.ok) throw new Error(j.error || "update failed");
-      el.textContent = "Updating — see the window";
-      setStatus("UPDATE", "Updater started in its own window (approve the admin prompt if asked). When it finishes, restart Premiere Pro.", "busy");
-    } catch (e) {
-      // engine too old (no /update_now) or down — fall back to the download page
-      openUrl(SITE_URL);
-      el.textContent = "Update from the site →";
-    }
-    return;
-  }
+  if (_updating) return;
+  if (updateReady) { runSelfUpdate(await _installedVersion()); return; }
   el.textContent = "Checking…";
   try {
-    // compare against what is actually INSTALLED (the engine's version); fall
-    // back to this panel's own version if the engine isn't running
-    let local = LOCAL_VERSION;
-    try {
-      const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
-      const vj = await vr.json(); if (vj && vj.version) local = vj.version;
-    } catch (e) {}
+    const local = await _installedVersion();
     const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
@@ -724,24 +766,13 @@ $("version").textContent = "v" + LOCAL_VERSION;
  * at startup only, so it can never interrupt a match in progress. */
 async function autoUpdateCheck() {
   try {
-    let local = LOCAL_VERSION;
-    try {
-      const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
-      const vj = await vr.json(); if (vj && vj.version) local = vj.version;
-    } catch (e) {}
+    const local = await _installedVersion();
     const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) return;
     const j = await r.json();
     if (!(j && j.version && semverGt(j.version, local))) return;
-    $("update-link").textContent = "Updating to v" + j.version + "…";
-    setStatus("UPDATE", "New version v" + j.version + " — updating automatically. Approve the admin prompt if one appears; when the updater window finishes, restart Premiere Pro.", "busy");
-    const u = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
-    const uj = await u.json().catch(() => ({ ok: false }));
-    if (!uj || !uj.ok) {          // engine too old for /update_now — arm the manual button
-      $("update-link").textContent = "Update v" + j.version + " — install";
-      updateReady = true;
-      setStatus("UPDATE", "New version v" + j.version + " available — click Update below to install.", "idle");
-    }
+    // Fully automatic, fully in-panel: bar below, no windows, no browser.
+    runSelfUpdate(local);
   } catch (e) {}
 }
 setTimeout(autoUpdateCheck, 1500);

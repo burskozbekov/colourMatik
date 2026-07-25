@@ -4,6 +4,12 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"; cd "$DIR"
 B='\033[1;34m'; G='\033[1;32m'; N='\033[0m'
+# The panel shows a live progress bar by polling this file through the engine
+# (GET /update_progress). Format: "pct|message".
+PROG="$HOME/Library/Application Support/colourMatik/update_progress"
+mkdir -p "$(dirname "$PROG")" 2>/dev/null || true
+prog() { printf '%s|%s' "$1" "$2" > "$PROG" 2>/dev/null || true; }
+prog 5 "Downloading the newest colourMatik"
 echo "${B}==> Updating colourMatik...${N}"
 
 if [ -d .git ] && command -v git >/dev/null 2>&1; then
@@ -21,11 +27,16 @@ else
   rm -rf "$TMP"
 fi
 
+prog 25 "Refreshing the engine"
 echo "${B}==> Refreshing engine + AI...${N}";  ./setup.sh
+prog 75 "Reinstalling the panel"
 echo "${B}==> Reinstalling panel + effect...${N}"
 ./install-panel.sh  >/dev/null 2>&1 || true
+prog 85 "Reinstalling the effect"
 ./install-effect.sh || true
+prog 96 "Restarting the engine"
 launchctl kickstart -k "gui/$(id -u)/com.colourmatik.engine" 2>/dev/null || true
+prog 100 "Done"
 
 echo "${G}==> Updated. Restart Premiere Pro.${N}"
 [ -t 0 ] && { printf "(press any key)"; read -rn1 _; echo; } || true
