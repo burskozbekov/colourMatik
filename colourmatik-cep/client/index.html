@@ -69,6 +69,12 @@
     .primary:disabled:not(.loading) { opacity: 0.45; }
 
     #intensity-section.hidden { display: none; }
+    #axes { display: flex; gap: 8px; margin-top: 8px; }
+    .axis { flex: 1; }
+    .axis-name { display: block; font-size: 9px; letter-spacing: 0.06em;
+                 color: #8a8a8e; margin-bottom: 2px; }
+    .axis-name b { float: right; font-weight: 500; color: #b9b9be; }
+    .axis input[type="range"] { width: 100%; margin: 0; }
     .intensity-head {
       display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;
     }
@@ -93,6 +99,29 @@
     #preview.hidden { display: none; }
     #alts { margin-top: 8px; display: flex; gap: 6px; }
     #alts.hidden { display: none; }
+    #lib-save { margin-left: 6px; color: #8a8a8e; cursor: pointer; font-size: 14px;
+                flex: 0 0 auto; user-select: none; }
+    #lib-save:hover { color: #e2a33e; }
+    #library { display: flex; gap: 6px; overflow-x: auto; margin: 6px 0 2px; padding-bottom: 2px; }
+    #library.hidden { display: none; }
+    .lib-item { position: relative; flex: 0 0 auto; width: 64px; cursor: pointer;
+                border: 1px solid #3d3d3d; border-radius: 4px; overflow: hidden; }
+    .lib-item img { width: 100%; display: block; }
+    .lib-item .lib-x { position: absolute; top: 0; right: 0; width: 14px; height: 14px;
+                line-height: 13px; text-align: center; font-size: 10px; color: #ccc;
+                background: rgba(0,0,0,0.55); cursor: pointer; display: none; }
+    .lib-item:hover .lib-x { display: block; }
+    #wipe { margin-top: 8px; }
+    #wipe.hidden { display: none; }
+    #wipe-wrap { position: relative; overflow: hidden; border-radius: 4px;
+                 border: 1px solid #3d3d3d; touch-action: none; }
+    #wipe-wrap img { width: 100%; display: block; }
+    #wipe-top { position: absolute; top: 0; left: 0; bottom: 0; width: 50%; overflow: hidden; }
+    #wipe-top img { height: 100%; width: auto; max-width: none; }
+    #wipe-bar { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+                background: #1473e6; cursor: ew-resize; }
+    .wipe-hint { font-size: 9px; letter-spacing: 0.05em; color: #77777c;
+                 text-align: center; margin-top: 3px; }
     .alt { flex: 1; cursor: pointer; border: 1px solid #3d3d3d; border-radius: 4px;
            overflow: hidden; background: #161617; }
     .alt img { width: 100%; display: block; }
@@ -125,6 +154,8 @@
 
   <div class="section">
     <span class="field-label">REFERENCE — THE LOOK TO COPY</span>
+    <div id="library" class="hidden"></div>
+
     <div class="slot">
       <div class="slot-btn" id="refBtn" title="Set from the selected clip">
         <!-- eyedropper: pick the look -->
@@ -133,6 +164,7 @@
         </svg>
       </div>
       <div class="slot-name" id="refName">No clip selected</div>
+      <span id="lib-save" title="Save this reference to the gallery">&#9734;</span>
     </div>
   </div>
 
@@ -178,6 +210,14 @@
       <span class="intensity-val" id="intensity-val">100%</span>
     </div>
     <input type="range" id="intensity" min="0" max="200" value="100" />
+    <div id="axes">
+      <div class="axis"><span class="axis-name">WB <b id="ax-wb-val">100</b></span>
+        <input type="range" id="ax-wb" min="0" max="150" value="100" /></div>
+      <div class="axis"><span class="axis-name">TONE <b id="ax-tone-val">100</b></span>
+        <input type="range" id="ax-tone" min="0" max="150" value="100" /></div>
+      <div class="axis"><span class="axis-name">COLOR <b id="ax-color-val">100</b></span>
+        <input type="range" id="ax-color" min="0" max="150" value="100" /></div>
+    </div>
   </div>
 
   <div id="status" class="idle">
@@ -187,6 +227,15 @@
 
   <div id="preview" class="hidden"><img id="preview-img" src="" alt="before / after" /></div>
   <div id="alts" class="hidden"></div>
+  <div id="wipe" class="hidden">
+    <div id="wipe-wrap">
+      <img id="wipe-before" src="" alt="before" />
+      <div id="wipe-top"><img id="wipe-after" src="" alt="after" /></div>
+      <div id="wipe-bar"></div>
+    </div>
+    <div class="wipe-hint">BEFORE &#8596; AFTER &mdash; drag</div>
+  </div>
+
 
   <div class="footer">
     <span class="brand">colourMatik</span><span class="dot">&middot;</span>by Sevki Bugra Ozbek<span class="dot">&middot;</span><span id="site-link">catheadai.com</span>

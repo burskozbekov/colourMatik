@@ -35,6 +35,10 @@ class MatchResult:
     # The panel shows these as clickable look previews instead of silently
     # discarding every runner-up.
     alts: dict = field(default_factory=dict)
+    # Small linear-RGB sample of each side (float32), kept so the strength
+    # decomposition (WB / tone / colour sliders) can be fitted on demand.
+    sample_src_lin: np.ndarray | None = None
+    sample_tgt_lin: np.ndarray | None = None
 
 
 def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True,
@@ -42,7 +46,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
           lattice_L: int = 25, sample: int = 300_000, seed: int = 0,
           skin_protect: bool = True, skin_weight: float = 8.0,
           neural: bool = True, look: str = "exact",
-          refine: bool = True, progress=None) -> MatchResult:
+          refine: bool = True, quick: bool = False, progress=None) -> MatchResult:
     """Match `src_enc` (video 2) to `tgt_enc` (video 1). Returns winning LUT + report.
 
     Every candidate is turned into its actual `size^3` LUT, that LUT is applied to
@@ -118,6 +122,15 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     S_enc = src_enc.reshape(-1, 3)
     T_enc = tgt_enc.reshape(-1, 3)
 
+    # Quick mode: the 2-5s draft the panel applies immediately while the full
+    # contest keeps running in the background. Fewer samples, cheap candidates
+    # only, no AI, no refine - the full pass hot-swaps the result moments later.
+    if quick:
+        sample = min(sample, 60_000)
+        degrees = (1, 2)
+        neural = False
+        refine = False
+
     rng = np.random.default_rng(seed)
 
     def _pick(n_total):
@@ -157,10 +170,14 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         _p(0.10, "Matching colour distributions")
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)  # linear
         luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)  # 1D curves + 3D residual
-        transported = np.clip(tf_mod.fit_idt(Sf_lin, Tf_lin, seed=seed), 0.0, None)  # nonlinear
-        lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
-                                     L=lattice_L, weights=weights)
-        luts["idt"] = resample_lut(lat, size)
+        if quick:
+            transported = None
+        else:
+            transported = np.clip(tf_mod.fit_idt(Sf_lin, Tf_lin, seed=seed), 0.0, None)  # nonlinear
+        if transported is not None:
+            lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
+                                         L=lattice_L, weights=weights)
+            luts["idt"] = resample_lut(lat, size)
         # ModFlows (AAAI 2025, MIT weights): encoder-predicted rectified flows,
         # a pure RGB->RGB map evaluated EXACTLY on the lattice. Optional (needs
         # torch + a one-time ~170MB weight download); absent -> one fewer candidate.
@@ -177,6 +194,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         # AI extras). Fixes IDT's exact-mass failure: a reference dominated by one
         # colour (a huge sky) no longer forces that colour onto unrelated content.
         try:
+            if quick:
+                raise ImportError("quick mode skips uot")
             _u = np.random.default_rng(seed + 1)
             cap = 6_000   # tensorized Sinkhorn is O(N*M); 6k points describe a 3D colour cloud fine
             ui = (_u.choice(Sf_lin.shape[0], cap, replace=False)
@@ -285,6 +304,9 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         # Keep the top runner-up candidates (same guards) so the panel can offer
         # them as alternative looks. Winner goes first under its own name.
         res.alts[res.method] = res.lut.astype(np.float32)
+        # small linear samples for the WB/Tone/Colour strength decomposition
+        res.sample_src_lin = Sf_lin[:30000].astype(np.float32)
+        res.sample_tgt_lin = Tf_lin[:30000].astype(np.float32)
         for name in sorted(scores, key=scores.get):
             if len(res.alts) >= 3:
                 break

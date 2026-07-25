@@ -242,12 +242,43 @@ async function run() {
   $("run").disabled = true;
   $("preview").className = "hidden";
   $("alts").className = "hidden"; $("alts").innerHTML = "";
+  $("wipe").className = "hidden";
+  resetAxes();
   state.slot = null;                 // mid-match intensity drags must no-op, not apply the old LUT
   $("intensity-section").className = "section hidden";
   setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
   const jobId = newJobId();
   startProgress(jobId);
   let ok = false;
+  // INSTANT DRAFT: a 2-5s cheap match applied immediately, so the user sees the
+  // look right away while the full contest (AI included) refines in the
+  // background and hot-swaps the result. Any failure here is silently ignored -
+  // the full pass below is the source of truth.
+  try {
+    const dres = await fetchT(SERVER + "/match_paths", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_path: tgt.srcPath, reference_path: tgt.refPath,
+        mode: currentMode(), tf: "sRGB", frames: 3, look: currentLook(),
+        source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
+        reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
+        fast: true,
+      }),
+    }, 45000);
+    const dj = await dres.json();
+    if (dj && dj.ok && gen === _runGen && tgt.trackItem) {
+      const der = await fetchT(SERVER + "/effect_lut", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rid: dj.rid }) }, 15000);
+      const de = await der.json();
+      if (de && de.ok && gen === _runGen) {
+        state.slot = de.slot;
+        try { await applyEffect(tgt.trackItem, de.slot, DEFAULT_INTENSITY); } catch (e) {}
+        setStatus("DRAFT", "Draft look applied - refining with AI in the background...", "busy");
+      }
+    }
+  } catch (e) {}
+  if (gen !== _runGen) return;
   try {
     let res;
     try {
@@ -302,7 +333,7 @@ async function run() {
       $("intensity").value = DEFAULT_INTENSITY;
       $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
     }
-    if (slot != null) loadAlts(j.rid, tgt, gen);   // clickable alternative looks
+    if (slot != null) { loadAlts(j.rid, tgt, gen); loadWipe(j.rid, gen); }   // looks + A/B wipe
 
     const label = j.method_label || j.method;
     const mTxt = j.ai_used ? `${label} 🧠` : label;   // brain = local AI chose the match
@@ -344,6 +375,79 @@ async function run() {
   }
 }
 
+/* ---- Reference gallery + A/B wipe ----------------------------------------- */
+async function loadLibrary() {
+  try {
+    const r = await fetchT(SERVER + "/library_list", { cache: "no-cache" }, 8000);
+    const j = await r.json();
+    const box = $("library");
+    if (!j.ok || !j.items || !j.items.length) { box.className = "hidden"; box.innerHTML = ""; return; }
+    box.innerHTML = "";
+    for (const it of j.items) {
+      const d = document.createElement("div");
+      d.className = "lib-item"; d.title = it.name;
+      d.innerHTML = '<img src="' + it.thumb + '"><span class="lib-x">&times;</span>';
+      d.addEventListener("click", () => {
+        state.refPath = it.path; state.refIn = null; state.refOut = null;
+        $("refName").textContent = it.name; $("refName").className = "slot-name set";
+        refreshRun();
+        setStatus("READY", "Reference set from the gallery.", "idle");
+      });
+      d.querySelector(".lib-x").addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try { await fetchT(SERVER + "/library_del", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: it.id }) }, 8000); } catch (e) {}
+        loadLibrary();
+      });
+      box.appendChild(d);
+    }
+    box.className = "";
+  } catch (e) {}
+}
+async function saveRefToLibrary() {
+  if (!state.refPath) return setStatus("SELECT", "Pick a reference first, then save it.", "error");
+  try {
+    const r = await fetchT(SERVER + "/library_add", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.refPath }) }, 20000);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "save failed");
+    setStatus("SAVED", "Reference saved to the gallery.", "done");
+    loadLibrary();
+  } catch (e) { setStatus("ERROR", "Couldn't save: " + (e.message || e), "error"); }
+}
+function _wipeSet(pct) {
+  pct = Math.max(2, Math.min(98, pct));
+  $("wipe-top").style.width = pct + "%";
+  $("wipe-bar").style.left = pct + "%";
+}
+async function loadWipe(rid, gen) {
+  try {
+    const r = await fetchT(SERVER + "/wipe/" + rid, { cache: "no-cache" }, 20000);
+    const j = await r.json();
+    if (!j.ok || gen !== _runGen) return;
+    $("wipe-before").src = j.before;
+    const wa = $("wipe-after");
+    wa.src = j.after;
+    const wrap = $("wipe-wrap");
+    const size = () => { wa.style.width = wrap.clientWidth + "px"; };
+    wa.onload = size; size();
+    $("wipe").className = "";
+    _wipeSet(50);
+    if (!wrap._wired) {
+      wrap._wired = true;
+      const move = (ev) => {
+        const b = wrap.getBoundingClientRect();
+        _wipeSet(((ev.clientX - b.left) / Math.max(1, b.width)) * 100);
+      };
+      wrap.addEventListener("pointerdown", (ev) => { move(ev); wrap.setPointerCapture(ev.pointerId); wrap._drag = true; });
+      wrap.addEventListener("pointermove", (ev) => { if (wrap._drag) move(ev); });
+      wrap.addEventListener("pointerup", () => { wrap._drag = false; });
+    }
+  } catch (e) {}
+}
+
 /* ---- Alternative looks: the contest's top candidates, clickable ----------- */
 async function loadAlts(rid, tgt, gen) {
   try {
@@ -371,6 +475,8 @@ async function loadAlts(rid, tgt, gen) {
           if (tgt.trackItem) { try { await applyEffect(tgt.trackItem, ej.slot, pct); } catch (e) {} }
           for (const el of box.children) el.className = "alt";
           d.className = "alt selected";
+          resetAxes();
+          loadWipe(rid, gen);
           setStatus("DONE", "Look switched to " + a.label + ".", "done");
         } catch (e) {
           setStatus("ERROR", "Couldn't switch look: " + (e.message || e), "error");
@@ -380,6 +486,38 @@ async function loadAlts(rid, tgt, gen) {
     }
     box.className = "";
   } catch (e) {}
+}
+
+/* ---- WB / Tone / Colour strength axes ------------------------------------- */
+let axesTimer = null;
+function resetAxes() {
+  for (const k of ["wb", "tone", "color"]) {
+    const el = $("ax-" + k); if (!el) continue;
+    el.value = 100; $("ax-" + k + "-val").textContent = "100";
+  }
+}
+function onAxis() {
+  for (const k of ["wb", "tone", "color"])
+    $("ax-" + k + "-val").textContent = $("ax-" + k).value;
+  if (axesTimer) clearTimeout(axesTimer);
+  axesTimer = setTimeout(applyAxes, 300);
+}
+async function applyAxes() {
+  if (!state.rid || state.slot == null) return;
+  try {
+    const body = { rid: state.rid,
+      wb: (parseInt($("ax-wb").value, 10) || 100) / 100,
+      tone: (parseInt($("ax-tone").value, 10) || 100) / 100,
+      color: (parseInt($("ax-color").value, 10) || 100) / 100 };
+    const r = await fetchT(SERVER + "/effect_lut", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, 30000);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || "strength failed");
+    state.slot = j.slot;
+    const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
+    if (state.srcTrackItem) { try { await applyEffect(state.srcTrackItem, j.slot, pct); } catch (e) {} }
+    setStatus("TUNE", "WB " + $("ax-wb").value + "% · Tone " + $("ax-tone").value + "% · Color " + $("ax-color").value + "% — applied.", "busy");
+  } catch (e) { setStatus("ERROR", "Strength error: " + (e.message || e), "error"); }
 }
 
 /* ---- Intensity: live re-scale of the applied Lumetri sliders --------------- */
@@ -468,6 +606,9 @@ $("look-ai").addEventListener("click", () => {
 });
 $("run").addEventListener("click", run);
 $("intensity").addEventListener("input", onIntensity);
+for (const k of ["wb", "tone", "color"]) $("ax-" + k).addEventListener("input", onAxis);
+$("lib-save").addEventListener("click", saveRefToLibrary);
+loadLibrary();
 $("site-link").addEventListener("click", () => openUrl(SITE_URL));
 $("update-link").addEventListener("click", checkForUpdates);
 $("version").textContent = "v" + LOCAL_VERSION;

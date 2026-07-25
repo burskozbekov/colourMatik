@@ -48,6 +48,114 @@ def gamut_guard(lut: np.ndarray, samples_enc: np.ndarray,
     return w * lut + (1.0 - w) * fallback
 
 
+# ---------------------------------------------------------------- strength axes
+# The panel's WB / Tone / Colour sliders. The FINAL winning LUT (whatever
+# candidate produced it) is factored as  winner ≈ Residual ∘ Tone ∘ WB :
+#   WB    — per-channel linear gains matching the two clips' channel means,
+#   Tone  — per-channel slope-capped quantile curves fitted after WB,
+#   Residual — everything else (hue/saturation character), extracted from the
+#              winner itself by pushing the cube through the INVERSE of Tone∘WB.
+# Each stage can then be dialled toward identity independently and the three
+# recomposed into one fresh 65^3 LUT — the native effect never changes.
+
+def fit_wb_tone(src_lin: np.ndarray, tgt_lin: np.ndarray):
+    """Fit the WB gains + tone curves stages from linear samples of both clips."""
+    src_lin = np.asarray(src_lin, dtype=np.float64)
+    tgt_lin = np.asarray(tgt_lin, dtype=np.float64)
+    gains = np.array([
+        float(np.clip((tgt_lin[:, c].mean() + 1e-6) / (src_lin[:, c].mean() + 1e-6),
+                      0.25, 4.0))
+        for c in range(3)
+    ])
+    wb_src = src_lin * gains
+    qs = np.linspace(0.01, 0.99, 33)
+    curves = []
+    for c in range(3):
+        xq = np.quantile(wb_src[:, c], qs)
+        yq = np.quantile(tgt_lin[:, c], qs)
+        xq = np.maximum.accumulate(xq) + np.arange(33) * 1e-9
+        yq = np.maximum.accumulate(yq)
+        sl = np.clip(np.diff(yq) / np.maximum(np.diff(xq), 1e-9), 0.2, 5.0)
+        mid = 16                     # anchor at the median: midtones match exactly
+        y2 = np.empty_like(yq)
+        y2[mid] = yq[mid]
+        for i in range(mid, 0, -1):
+            y2[i - 1] = y2[i] - sl[i - 1] * (xq[i] - xq[i - 1])
+        for i in range(mid, 32):
+            y2[i + 1] = y2[i] + sl[i] * (xq[i + 1] - xq[i])
+        curves.append((xq, y2))
+    return gains, curves
+
+
+def _curve_eval(x, xq, yq, s=1.0):
+    v = np.interp(x, xq, yq)
+    lo_m = np.clip((yq[1] - yq[0]) / max(xq[1] - xq[0], 1e-9), 0.0, 5.0)
+    hi_m = np.clip((yq[-1] - yq[-2]) / max(xq[-1] - xq[-2], 1e-9), 0.0, 5.0)
+    below = x < xq[0]
+    above = x > xq[-1]
+    v[below] = yq[0] + (x[below] - xq[0]) * lo_m
+    v[above] = yq[-1] + (x[above] - xq[-1]) * hi_m
+    return x + (v - x) * s
+
+
+def apply_wb_tone(lin: np.ndarray, gains, curves, s_wb: float = 1.0,
+                  s_tone: float = 1.0) -> np.ndarray:
+    g = 1.0 + (np.asarray(gains) - 1.0) * float(s_wb)
+    out = lin * g
+    res = np.empty_like(out)
+    for c in range(3):
+        xq, yq = curves[c]
+        res[:, c] = _curve_eval(out[:, c], xq, yq, s=float(s_tone))
+    return res
+
+
+def _invert_wb_tone(lin_y: np.ndarray, gains, curves) -> np.ndarray:
+    """Full-strength inverse of Tone∘WB (both stages are per-channel monotone)."""
+    out = np.empty_like(lin_y)
+    for c in range(3):
+        xq, yq = curves[c]
+        yq2 = np.maximum.accumulate(yq) + np.arange(len(yq)) * 1e-9
+        x = np.interp(lin_y[:, c], yq2, xq)
+        lo_m = (yq2[1] - yq2[0]) / max(xq[1] - xq[0], 1e-9)
+        hi_m = (yq2[-1] - yq2[-2]) / max(xq[-1] - xq[-2], 1e-9)
+        below = lin_y[:, c] < yq2[0]
+        above = lin_y[:, c] > yq2[-1]
+        if lo_m > 1e-9:
+            x[below] = xq[0] + (lin_y[below, c] - yq2[0]) / lo_m
+        if hi_m > 1e-9:
+            x[above] = xq[-1] + (lin_y[above, c] - yq2[-1]) / hi_m
+        out[:, c] = x
+    return out / np.maximum(np.asarray(gains), 1e-9)
+
+
+def decompose_residual(winner_lut: np.ndarray, gains, curves,
+                       tf: str = "sRGB") -> np.ndarray:
+    """Extract R with winner ≈ R ∘ (Tone∘WB):  R(y) = winner((Tone∘WB)^-1(y))."""
+    size = winner_lut.shape[0]
+    ax = np.linspace(0.0, 1.0, size)
+    Rg, Gg, Bg = np.meshgrid(ax, ax, ax, indexing="ij")
+    grid = np.stack([Rg, Gg, Bg], -1).reshape(-1, 3)
+    lin = decode(grid, tf)
+    x_lin = _invert_wb_tone(lin, gains, curves)
+    x_enc = np.clip(encode(np.clip(x_lin, 0.0, None), tf), 0.0, 1.0)
+    vals = apply_lut_points(winner_lut, x_enc)
+    return np.clip(vals, 0.0, 1.0).reshape(size, size, size, 3)
+
+
+def recompose_lut(gains, curves, resid: np.ndarray, s_wb: float, s_tone: float,
+                  s_color: float, size: int = 65, tf: str = "sRGB") -> np.ndarray:
+    """Rebuild one LUT with each stage dialled to its own strength (1 = full)."""
+    ax = np.linspace(0.0, 1.0, size)
+    Rg, Gg, Bg = np.meshgrid(ax, ax, ax, indexing="ij")
+    grid = np.stack([Rg, Gg, Bg], -1).reshape(-1, 3)
+    lin = decode(grid, tf)
+    lin2 = apply_wb_tone(lin, gains, curves, s_wb=s_wb, s_tone=s_tone)
+    enc2 = np.clip(encode(soft_gamut(lin2), tf), 0.0, 1.0)
+    Rs = apply_intensity(np.asarray(resid, dtype=np.float64), float(s_color))
+    out = apply_lut_points(Rs, enc2)
+    return np.clip(out, 0.0, 1.0).reshape(size, size, size, 3)
+
+
 def lut_steepness(lut: np.ndarray, pct: float = 99.5) -> float:
     """The LUT's near-worst LOCAL slope (unitless; identity = 1).
 

@@ -174,12 +174,32 @@ async function run() {
   $("run").disabled = true;
   $("preview").className = "hidden";
   $("alts").className = "hidden"; $("alts").innerHTML = "";
+  $("wipe").className = "hidden";
+  resetAxes();
   state.slot = null;
   $("intensity-section").className = "section hidden";
   setStatus("MATCHING", "Working — this takes a few seconds…", "busy");
   var jobId = newJobId();
   startProgress(jobId);
   var ok = false;
+  // INSTANT DRAFT: cheap 2-5s match applied immediately; the full pass below
+  // refines and hot-swaps. Failures here are silently ignored.
+  try {
+    var dj = await postJSON("/match_paths", {
+      source_path: tgt.srcPath, reference_path: tgt.refPath,
+      mode: currentMode(), tf: "sRGB", frames: 3, look: currentLook(), fast: true
+    }, 45000);
+    if (dj && dj.ok && gen === _runGen) {
+      var de = await postJSON("/effect_lut", { rid: dj.rid }, 15000);
+      if (de && de.ok && gen === _runGen) {
+        state.slot = de.slot;
+        var apd = await evalHost("cm_apply(" + parseInt(de.slot, 10) + ", " + DEFAULT_INTENSITY + ", " +
+          (tgt.idx || 0) + ", " + (tgt.compId || 0) + ", " + jsArg(tgt.name) + ")");
+        if (apd && apd.ok) setStatus("DRAFT", "Draft look applied - refining with AI in the background...", "busy");
+      }
+    }
+  } catch (e) {}
+  if (gen !== _runGen) return;
   try {
     var j;
     try {
@@ -208,6 +228,7 @@ async function run() {
       $("intensity-val").textContent = DEFAULT_INTENSITY + "%";
       state.lastTgt = tgt;              // alt-look clicks re-apply to THIS layer
       loadAlts(j.rid, tgt, gen);        // clickable alternative looks
+      loadWipe(j.rid, gen);             // A/B wipe of the applied look
     }
 
     var label = j.method_label || j.method || "";
@@ -228,6 +249,72 @@ async function run() {
     _running = false;
     if (gen === _runGen) { if (!ok) stopProgress(false); refreshRun(); }
   }
+}
+
+/* ---- Reference gallery + A/B wipe ----------------------------------------- */
+async function loadLibrary() {
+  try {
+    var j = await getJSON("/library_list", 8000);
+    var box = $("library");
+    if (!j || !j.ok || !j.items || !j.items.length) { box.className = "hidden"; box.innerHTML = ""; return; }
+    box.innerHTML = "";
+    j.items.forEach(function (it) {
+      var d = document.createElement("div");
+      d.className = "lib-item"; d.title = it.name;
+      d.innerHTML = '<img src="' + it.thumb + '"><span class="lib-x">&times;</span>';
+      d.addEventListener("click", function () {
+        state.refPath = it.path;
+        $("refName").textContent = it.name; $("refName").className = "slot-name set";
+        refreshRun();
+        setStatus("READY", "Reference set from the gallery.", "idle");
+      });
+      d.querySelector(".lib-x").addEventListener("click", async function (ev) {
+        ev.stopPropagation();
+        try { await postJSON("/library_del", { id: it.id }, 8000); } catch (e) {}
+        loadLibrary();
+      });
+      box.appendChild(d);
+    });
+    box.className = "";
+  } catch (e) {}
+}
+async function saveRefToLibrary() {
+  if (!state.refPath) return setStatus("SELECT", "Pick a reference first, then save it.", "error");
+  try {
+    var j = await postJSON("/library_add", { path: state.refPath }, 20000);
+    if (!j || !j.ok) throw new Error((j && j.error) || "save failed");
+    setStatus("SAVED", "Reference saved to the gallery.", "done");
+    loadLibrary();
+  } catch (e) { setStatus("ERROR", "Couldn't save: " + (e.message || e), "error"); }
+}
+function _wipeSet(pct) {
+  pct = Math.max(2, Math.min(98, pct));
+  $("wipe-top").style.width = pct + "%";
+  $("wipe-bar").style.left = pct + "%";
+}
+async function loadWipe(rid, gen) {
+  try {
+    var j = await getJSON("/wipe/" + rid, 20000);
+    if (!j || !j.ok || gen !== _runGen) return;
+    $("wipe-before").src = j.before;
+    var wa = $("wipe-after");
+    wa.src = j.after;
+    var wrap = $("wipe-wrap");
+    var size = function () { wa.style.width = wrap.clientWidth + "px"; };
+    wa.onload = size; size();
+    $("wipe").className = "";
+    _wipeSet(50);
+    if (!wrap._wired) {
+      wrap._wired = true;
+      var move = function (ev) {
+        var b = wrap.getBoundingClientRect();
+        _wipeSet(((ev.clientX - b.left) / Math.max(1, b.width)) * 100);
+      };
+      wrap.addEventListener("pointerdown", function (ev) { move(ev); wrap.setPointerCapture(ev.pointerId); wrap._drag = true; });
+      wrap.addEventListener("pointermove", function (ev) { if (wrap._drag) move(ev); });
+      wrap.addEventListener("pointerup", function () { wrap._drag = false; });
+    }
+  } catch (e) {}
 }
 
 /* ---- Alternative looks: the contest's top candidates, clickable ----------- */
@@ -254,6 +341,8 @@ async function loadAlts(rid, tgt, gen) {
           if (!ap.ok) throw new Error(ap.message || "apply failed");
           for (var i = 0; i < box.children.length; i++) box.children[i].className = "alt";
           d.className = "alt selected";
+          resetAxes();
+          loadWipe(rid, gen);
           setStatus("DONE", "Look switched to " + a.label + ".", "done");
         } catch (e) {
           setStatus("ERROR", "Couldn't switch look: " + (e.message || e), "error");
@@ -263,6 +352,40 @@ async function loadAlts(rid, tgt, gen) {
     });
     box.className = "";
   } catch (e) {}
+}
+
+/* ---- WB / Tone / Colour strength axes ------------------------------------- */
+var axesTimer = null;
+function resetAxes() {
+  ["wb", "tone", "color"].forEach(function (k) {
+    var el = $("ax-" + k); if (!el) return;
+    el.value = 100; $("ax-" + k + "-val").textContent = "100";
+  });
+}
+function onAxis() {
+  ["wb", "tone", "color"].forEach(function (k) {
+    $("ax-" + k + "-val").textContent = $("ax-" + k).value;
+  });
+  if (axesTimer) clearTimeout(axesTimer);
+  axesTimer = setTimeout(applyAxes, 300);
+}
+async function applyAxes() {
+  if (!state.rid || state.slot == null || !state.lastTgt) return;
+  try {
+    var body = { rid: state.rid,
+      wb: (parseInt($("ax-wb").value, 10) || 100) / 100,
+      tone: (parseInt($("ax-tone").value, 10) || 100) / 100,
+      color: (parseInt($("ax-color").value, 10) || 100) / 100 };
+    var j = await postJSON("/effect_lut", body, 30000);
+    if (!j || !j.ok) throw new Error((j && j.error) || "strength failed");
+    state.slot = j.slot;
+    var pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
+    var tgt = state.lastTgt;
+    var ap = await evalHost("cm_apply(" + parseInt(j.slot, 10) + ", " + pct + ", " +
+      (tgt.idx || 0) + ", " + (tgt.compId || 0) + ", " + jsArg(tgt.name) + ")");
+    if (!ap.ok) throw new Error(ap.message || "apply failed");
+    setStatus("TUNE", "WB " + $("ax-wb").value + "% · Tone " + $("ax-tone").value + "% · Color " + $("ax-color").value + "% — applied.", "busy");
+  } catch (e) { setStatus("ERROR", "Strength error: " + (e.message || e), "error"); }
 }
 
 /* ---- Intensity: live re-set of the effect param --------------------------- */
@@ -338,6 +461,9 @@ $("look-exact").addEventListener("click", function () { $("look-exact").classLis
 $("look-ai").addEventListener("click", function () { $("look-ai").classList.add("selected"); $("look-exact").classList.remove("selected"); });
 $("run").addEventListener("click", run);
 $("intensity").addEventListener("input", onIntensity);
+["wb", "tone", "color"].forEach(function (k) { $("ax-" + k).addEventListener("input", onAxis); });
+$("lib-save").addEventListener("click", saveRefToLibrary);
+loadLibrary();
 $("site-link").addEventListener("click", function () { cs.openURLInDefaultBrowser(SITE_URL); });
 $("update-link").addEventListener("click", checkForUpdates);
 $("version").textContent = "v" + LOCAL_VERSION;

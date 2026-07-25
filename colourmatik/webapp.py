@@ -25,7 +25,8 @@ import numpy as np
 from . import io as cmio
 from . import colorspace as cs
 from .match import match, format_report
-from .lut import write_cube, apply_lut, apply_lut_points, apply_intensity, resample_lut
+from .lut import (write_cube, apply_lut, apply_lut_points, apply_intensity, resample_lut,
+                  fit_wb_tone, decompose_residual, recompose_lut)
 from .viz import make_comparison
 from .metrics import image_delta_e00, summarize
 
@@ -200,11 +201,13 @@ def index() -> str:
 def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
              job: Path, title: str, look: str = "exact",
              src_range: tuple | None = None, ref_range: tuple | None = None,
-             job_id: str | None = None) -> dict:
+             job_id: str | None = None, fast: bool = False) -> dict:
     corresponded = (mode == "same")
     # Frame pooling (stacked frames) helps the classical distribution methods, but the
     # learned look-transfer (CanonCGT) analyses ONE coherent image — give it a single frame.
     f = 1 if look == "ai_grade" else frames
+    if fast:
+        f = min(f, 3)            # the draft reads 3 frames; the full pass re-reads properly
     si, so = src_range or (None, None)
     ri, ro = ref_range or (None, None)
 
@@ -224,13 +227,14 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
 
     _set_progress(job_id, 0.16, "Analysing colour")
     # match() spans 16%..82% of the bar; forward its internal milestones.
-    res = match(src, ref, corresponded=corresponded, tf=tf, look=look,
+    res = match(src, ref, corresponded=corresponded, tf=tf, look=look, quick=fast,
                 progress=lambda p, m: _set_progress(job_id, 0.16 + p * 0.66, m))
 
     _set_progress(job_id, 0.84, "Baking the LUT")
     cube = job / "colourMatik.cube"
     write_cube(cube, res.lut, title=title)
-    _install_lut(res.lut, tf)  # expose in Premiere LUT dropdowns (visible after next launch)
+    if not fast:
+        _install_lut(res.lut, tf)  # expose in Premiere LUT dropdowns (visible after next launch)
 
     # Preview uses ONE frame — reuse the first frame already decoded above (each
     # pooled VIDEO clip is n frames stacked vertically) instead of decoding again.
@@ -246,14 +250,18 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
         return arr
     src1 = _first_frame(src, src_path)
     ref1 = _first_frame(ref, ref_path)
-    _set_progress(job_id, 0.92, "Rendering the preview")
-    matched1 = apply_lut(src1, res.lut)
-    preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
+    if fast:
+        preview, db, da = "", None, None       # the full pass renders the real preview
+    else:
+        _set_progress(job_id, 0.92, "Rendering the preview")
+        matched1 = apply_lut(src1, res.lut)
+        preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
 
     rid = uuid.uuid4().hex
     _remember(rid, cube, {"lut": res.lut, "tf": tf, "src1": src1, "ref1": ref1,
                           "corresponded": corresponded, "alts": res.alts,
-                          "scores": res.scores, "method": res.method})
+                          "scores": res.scores, "method": res.method,
+                          "s_lin": res.sample_src_lin, "t_lin": res.sample_tgt_lin})
     _set_progress(job_id, 1.0, "Done")
     return {
         "ok": True,
@@ -297,6 +305,7 @@ class PathReq(BaseModel):
     mode: str = "different"
     tf: str = "sRGB"
     frames: int = 7            # frames pooled per clip (sampling variance dominates accuracy)
+    fast: bool = False         # 2-5s draft: fewer samples/candidates; panel refines after
     look: str = "exact"        # "exact" = accuracy contest; "ai_grade" = CanonCGT look
     # Timeline segment (seconds, source-media-relative). When the panel sends the
     # track item's in/out, sampling stays inside the part actually used in the edit.
@@ -322,7 +331,7 @@ def match_paths(req: PathReq):
                                      f"colourMatik {src.stem}", look=req.look,
                                      src_range=(req.source_in, req.source_out),
                                      ref_range=(req.reference_in, req.reference_out),
-                                     job_id=req.job_id))
+                                     job_id=req.job_id, fast=req.fast))
     except Exception as e:
         traceback.print_exc()
         if req.job_id:
@@ -428,6 +437,11 @@ class EffectLutReq(BaseModel):
     intensity: float = 1.0  # baked at full strength by default; the effect's own
     #                         Intensity slider does the live dialing, so leave at 1.0
     variant: str | None = None   # pick an alternative candidate look by name
+    # Per-axis strengths (1.0 = the full match). The winning LUT is factored into
+    # WB / Tone / Colour stages on first use and recomposed at these strengths.
+    wb: float = 1.0
+    tone: float = 1.0
+    color: float = 1.0
 
 
 @app.get("/alts/{rid}")
@@ -479,6 +493,20 @@ def effect_lut(req: EffectLutReq):
                 return JSONResponse({"ok": False, "error": "unknown variant"}, status_code=404)
             lut = np.asarray(alt, dtype=np.float64)
             j["lut"] = lut          # strength/wipe operations follow the chosen look
+            j.pop("_dec", None)     # decomposition belongs to the previous look
+        if (req.wb, req.tone, req.color) != (1.0, 1.0, 1.0) and j.get("s_lin") is not None:
+            dec = j.get("_dec")
+            if dec is None:
+                gains, curves = fit_wb_tone(np.asarray(j["s_lin"], dtype=np.float64),
+                                            np.asarray(j["t_lin"], dtype=np.float64))
+                resid = decompose_residual(np.asarray(j["lut"], dtype=np.float64),
+                                           gains, curves, j["tf"])
+                dec = {"gains": gains, "curves": curves, "resid": resid}
+                j["_dec"] = dec
+            lut = recompose_lut(dec["gains"], dec["curves"], dec["resid"],
+                                s_wb=float(req.wb), s_tone=float(req.tone),
+                                s_color=float(req.color),
+                                size=j["lut"].shape[0], tf=j["tf"])
         if req.intensity != 1.0:
             lut = apply_intensity(lut, float(req.intensity))
         lut_fx = resample_lut(lut, _EFFECT_LUT_SIZE)
@@ -489,6 +517,108 @@ def effect_lut(req: EffectLutReq):
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
+@app.get("/wipe/{rid}")
+def wipe(rid: str):
+    """Before/after frames of the CURRENT look for the panel's A/B wipe."""
+    j = _JOBS.get(rid)
+    if j is None:
+        return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
+    try:
+        from PIL import Image
+        src1 = j["src1"]
+        h, w = src1.shape[:2]
+        tw = 480; th = max(1, int(h * tw / max(w, 1)))
+        base = np.asarray(Image.fromarray(
+            (np.clip(src1, 0, 1) * 255 + 0.5).astype("uint8")).resize((tw, th)),
+            dtype=np.float64) / 255.0
+        after = apply_lut(base, np.asarray(j["lut"], dtype=np.float64))
+        def _durl(img):
+            buf = Path(tempfile.mkstemp(suffix=".jpg")[1])
+            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(buf, quality=85)
+            s = "data:image/jpeg;base64," + _b64.b64encode(buf.read_bytes()).decode()
+            buf.unlink(missing_ok=True)
+            return s
+        return {"ok": True, "before": _durl(base), "after": _durl(after)}
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
+# ---- Reference stills library (the colorist "gallery" idiom) ---------------
+_LIB_DIR = _SLOT_DIR / "library"
+_LIB_JSON = _LIB_DIR / "library.json"
+
+
+def _lib_load() -> list:
+    try:
+        import json
+        return json.loads(_LIB_JSON.read_text())
+    except Exception:
+        return []
+
+
+def _lib_save(items: list) -> None:
+    import json
+    _LIB_DIR.mkdir(parents=True, exist_ok=True)
+    _LIB_JSON.write_text(json.dumps(items, ensure_ascii=False))
+
+
+class LibAddReq(BaseModel):
+    path: str
+    t: float | None = None      # optional source-relative second for the thumb
+
+
+@app.post("/library_add")
+def library_add(req: LibAddReq):
+    """Save a reference (video or still) into the local gallery with a thumb."""
+    try:
+        from PIL import Image
+        src = Path(req.path)
+        if not src.exists():
+            return JSONResponse({"ok": False, "error": "file not found"}, status_code=400)
+        frame = cmio.load_any(src, t=req.t, frames=1)
+        h, w = frame.shape[:2]
+        tw = 160; th = max(1, int(h * tw / max(w, 1)))
+        thumb = Image.fromarray((np.clip(frame, 0, 1) * 255 + 0.5).astype("uint8")).resize((tw, th))
+        _LIB_DIR.mkdir(parents=True, exist_ok=True)
+        lid = uuid.uuid4().hex[:12]
+        thumb.save(_LIB_DIR / f"{lid}.jpg", quality=85)
+        items = _lib_load()
+        items.insert(0, {"id": lid, "path": str(src), "name": src.name})
+        _lib_save(items[:60])                      # bounded gallery
+        return {"ok": True, "id": lid}
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
+
+@app.get("/library_list")
+def library_list():
+    out = []
+    for it in _lib_load():
+        tp = _LIB_DIR / f"{it['id']}.jpg"
+        if not tp.exists():
+            continue
+        out.append({**it, "thumb": "data:image/jpeg;base64," +
+                    _b64.b64encode(tp.read_bytes()).decode()})
+    return {"ok": True, "items": out}
+
+
+class LibDelReq(BaseModel):
+    id: str
+
+
+@app.post("/library_del")
+def library_del(req: LibDelReq):
+    items = [it for it in _lib_load() if it.get("id") != req.id]
+    _lib_save(items)
+    try:
+        (_LIB_DIR / f"{req.id}.jpg").unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"ok": True}
 
 
 @app.get("/version")
