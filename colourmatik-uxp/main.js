@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.1";
+const LOCAL_VERSION = "1.5.2";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -47,20 +47,39 @@ function refreshRun() {
 }
 
 /* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
-let _progPoll = null, _progTick = null, _progReset = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+let _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+/* The chameleon sprite: 18 frames of the real walk-cycle artwork stacked in one
+ * image. _chamStep advances the frame; _chamPlace parks it on the fill's edge. */
+const CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33;
+let _chamFrame = 0;
+function _chamShow(on) {
+  const w = $("run-cham");
+  if (w) w.style.display = on ? "block" : "none";
+}
+function _chamStep() {
+  const img = $("run-cham-img");
+  if (!img) return;
+  _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
+  img.style.top = (-_chamFrame * CHAM_H) + "px";
+}
+function _chamPlace(pct) {
+  const w = $("run-cham"), b = $("run");
+  if (!w) return;
+  const bw = (b && b.offsetWidth) ? b.offsetWidth : 0;
+  // keep the whole animal inside the button; fall back to % if width is unknown
+  if (bw > CHAM_W + 8) w.style.left = Math.round((bw - CHAM_W) * Math.max(0, Math.min(1, pct))) + "px";
+  else w.style.left = (Math.max(0, Math.min(1, pct)) * 100).toFixed(1) + "%";
+}
 function _paintProg() {
   $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
-  const _c = $("run-cham");
-  if (_c) {                              // chameleon walks the fill edge + bobs
-    _c.style.left = (_dispPct * 100).toFixed(1) + "%";
-    _c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
-  }
+  _chamPlace(_dispPct);
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
 function startProgress(jobId) {
   // defensively clear anything a previous run left behind (intervals must never orphan)
   if (_progPoll) clearInterval(_progPoll);
   if (_progTick) clearInterval(_progTick);
+  if (_chamTick) clearInterval(_chamTick);
   if (_progReset) { clearTimeout(_progReset); _progReset = null; }
   _dispPct = 0; _srvPct = 0; _srvMsg = "Starting";
   $("run").classList.add("loading");
@@ -76,6 +95,8 @@ function startProgress(jobId) {
   }, 500);
   // Smoothly ease toward the server value, and gently creep forward within a
   // stage so the bar never looks frozen during the long AI steps.
+  _chamShow(true);
+  _chamTick = setInterval(_chamStep, 70);          // the walk itself
   _progTick = setInterval(() => {
     const soft = Math.min(0.97, _srvPct + 0.10);
     const target = Math.max(_srvPct, Math.min(soft, _dispPct + 0.006));
@@ -87,13 +108,16 @@ function startProgress(jobId) {
 function stopProgress(done) {
   if (_progPoll) clearInterval(_progPoll);
   if (_progTick) clearInterval(_progTick);
-  _progPoll = _progTick = null;
+  if (_chamTick) clearInterval(_chamTick);
+  _progPoll = _progTick = _chamTick = null;
+  if (!done) _chamShow(false);
   if (done) { _dispPct = 1; _srvMsg = "Done"; _paintProg(); }
   if (_progReset) clearTimeout(_progReset);
   _progReset = setTimeout(() => {
     _progReset = null;
     $("run").classList.remove("loading");
     $("run-fill").style.width = "0%";
+    _chamShow(false);
     $("run-label").textContent = "MATCH & APPLY";
   }, done ? 450 : 0);
 }
@@ -514,19 +538,11 @@ async function getAllVideoClips() {
 }
 /* MATCH ALL button: same colour-fill + walking chameleon as the main button */
 function _allBar(pct, text) {
-  const b = $("run-all"), f = $("run-all-fill"), l = $("run-all-label"), c = $("run-all-cham");
+  const b = $("run-all"), f = $("run-all-fill"), l = $("run-all-label");
   if (!f || !l) { if (b) b.textContent = text; return; }
-  if (pct == null) {
-    b.classList.remove("loading");
-    f.style.width = "0%";
-    if (c) c.style.left = "0%";
-    l.textContent = text;
-    return;
-  }
+  if (pct == null) { b.classList.remove("loading"); f.style.width = "0%"; l.textContent = text; return; }
   b.classList.add("loading");
-  const pp = (Math.max(0, Math.min(1, pct)) * 100).toFixed(1);
-  f.style.width = pp + "%";
-  if (c) c.style.left = pp + "%";
+  f.style.width = (Math.max(0, Math.min(1, pct)) * 100).toFixed(1) + "%";
   l.textContent = text;
 }
 async function matchAll() {
@@ -545,11 +561,6 @@ async function matchAll() {
   $("intensity-section").className = "section hidden";
   state.slot = null; state.rid = null;
   const btn = $("run-all");
-  const bobT = setInterval(() => {
-    const c = $("run-all-cham");
-    if (c && btn.classList.contains("loading"))
-      c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
-  }, 130);
   try {
     setStatus("SCAN", "Reading the timeline…", "busy");
     _allBar(0.03, "READING TIMELINE…");
@@ -604,7 +615,6 @@ async function matchAll() {
     setStatus("ERROR", String(e.message || e), "error");
   } finally {
     _matchingAll = false;
-    clearInterval(bobT);
     setTimeout(() => { _allBar(null, "MATCH ALL CLIPS"); refreshRunAll(); }, 1400);
     refreshRunAll();
   }
@@ -728,10 +738,8 @@ async function runSelfUpdate(fromVersion) {
   const el = $("update-link");
   $("run").disabled = true;
   $("run").classList.add("loading");
-  const _ub = setInterval(() => {        // keep the chameleon bobbing between polls
-    const c = $("run-cham");
-    if (c) c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
-  }, 130);
+  _chamShow(true);
+  const _ub = setInterval(_chamStep, 70);   // the chameleon walks while it updates
   try {
     const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
     const j = await r.json().catch(() => ({ ok: false }));
@@ -747,7 +755,7 @@ async function runSelfUpdate(fromVersion) {
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}                     // engine restarting — keep the bar alive
       $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
-      { const c = $("run-cham"); if (c) c.style.left = (pct * 100).toFixed(0) + "%"; }
+      _chamPlace(pct);
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
       try {
@@ -755,7 +763,7 @@ async function runSelfUpdate(fromVersion) {
         const vj = await vr.json();
         if (vj && vj.version && vj.version !== fromVersion) {
           $("run-fill").style.width = "100%";
-          { const c = $("run-cham"); if (c) c.style.left = "100%"; }
+          _chamPlace(1);
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
           setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart Premiere Pro to load the new panel.", "done");
@@ -774,6 +782,7 @@ async function runSelfUpdate(fromVersion) {
     setTimeout(() => {
       $("run").classList.remove("loading");
       $("run-fill").style.width = "0%";
+      _chamShow(false);
       $("run-label").textContent = "MATCH & APPLY";
       refreshRun();
     }, 1500);

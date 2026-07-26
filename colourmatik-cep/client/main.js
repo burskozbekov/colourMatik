@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.1";
+var LOCAL_VERSION = "1.5.2";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -94,19 +94,36 @@ function refreshRun() { $("run").disabled = !(state.refPath && state.srcPath); }
 function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 
 /* ---- Match & Apply loading bar (fed by GET /progress) --------------------- */
-var _progPoll = null, _progTick = null, _progReset = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+var _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
+/* 18 frames of the real walk-cycle artwork stacked in one sprite image. */
+var CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33, _chamFrame = 0;
+function _chamShow(on) {
+  var w = $("run-cham");
+  if (w) w.style.display = on ? "block" : "none";
+}
+function _chamStep() {
+  var img = $("run-cham-img");
+  if (!img) return;
+  _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
+  img.style.top = (-_chamFrame * CHAM_H) + "px";
+}
+function _chamPlace(pct) {
+  var w = $("run-cham"), b = $("run");
+  if (!w) return;
+  var bw = (b && b.offsetWidth) ? b.offsetWidth : 0;
+  var p = Math.max(0, Math.min(1, pct));
+  if (bw > CHAM_W + 8) w.style.left = Math.round((bw - CHAM_W) * p) + "px";
+  else w.style.left = (p * 100).toFixed(1) + "%";
+}
 function _paintProg() {
   $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
-  var _c = $("run-cham");
-  if (_c) {                              // chameleon walks the fill edge + bobs
-    _c.style.left = (_dispPct * 100).toFixed(1) + "%";
-    _c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
-  }
+  _chamPlace(_dispPct);
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
 function startProgress(jobId) {
   if (_progPoll) clearInterval(_progPoll);
   if (_progTick) clearInterval(_progTick);
+  if (_chamTick) clearInterval(_chamTick);
   if (_progReset) { clearTimeout(_progReset); _progReset = null; }
   _dispPct = 0; _srvPct = 0; _srvMsg = "Starting";
   $("run").classList.add("loading");
@@ -117,6 +134,8 @@ function startProgress(jobId) {
       if (j && typeof j.pct === "number") { _srvPct = j.pct; if (j.msg) _srvMsg = j.msg; }
     }).then(function () { polling = false; }, function () { polling = false; });
   }, 500);
+  _chamShow(true);
+  _chamTick = setInterval(_chamStep, 70);          // the walk itself
   _progTick = setInterval(function () {
     var soft = Math.min(0.97, _srvPct + 0.10);
     var target = Math.max(_srvPct, Math.min(soft, _dispPct + 0.006));
@@ -128,13 +147,16 @@ function startProgress(jobId) {
 function stopProgress(done) {
   if (_progPoll) clearInterval(_progPoll);
   if (_progTick) clearInterval(_progTick);
-  _progPoll = _progTick = null;
+  if (_chamTick) clearInterval(_chamTick);
+  _progPoll = _progTick = _chamTick = null;
+  if (!done) _chamShow(false);
   if (done) { _dispPct = 1; _srvMsg = "Done"; _paintProg(); }
   if (_progReset) clearTimeout(_progReset);
   _progReset = setTimeout(function () {
     _progReset = null;
     $("run").classList.remove("loading");
     $("run-fill").style.width = "0%";
+    _chamShow(false);
     $("run-label").textContent = "MATCH & APPLY";
   }, done ? 450 : 0);
 }
@@ -442,10 +464,8 @@ async function runSelfUpdate(fromVersion) {
   var el = $("update-link");
   $("run").disabled = true;
   $("run").classList.add("loading");
-  var _ub = setInterval(function () {    // keep the chameleon bobbing between polls
-    var c = $("run-cham");
-    if (c) c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
-  }, 130);
+  _chamShow(true);
+  var _ub = setInterval(_chamStep, 70);   // the chameleon walks while it updates
   try {
     var j = await postJSON("/update_now", {}, 8000);
     if (!j || !j.ok) throw new Error((j && j.error) || "the engine couldn't start the update");
@@ -459,14 +479,14 @@ async function runSelfUpdate(fromVersion) {
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}
       $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
-      var _cc = $("run-cham"); if (_cc) _cc.style.left = (pct * 100).toFixed(0) + "%";
+      _chamPlace(pct);
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
       try {
         var vj = await getJSON("/version", 2500);
         if (vj && vj.version && vj.version !== fromVersion) {
           $("run-fill").style.width = "100%";
-          var _cd = $("run-cham"); if (_cd) _cd.style.left = "100%";
+          _chamPlace(1);
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
           setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart After Effects to load the new panel.", "done");
@@ -485,6 +505,7 @@ async function runSelfUpdate(fromVersion) {
     setTimeout(function () {
       $("run").classList.remove("loading");
       $("run-fill").style.width = "0%";
+      _chamShow(false);
       $("run-label").textContent = "MATCH & APPLY";
       refreshRun();
     }, 1500);

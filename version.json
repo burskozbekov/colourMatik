@@ -1,5 +1,5 @@
 {
-  "version": "1.5.1",
+  "version": "1.5.2",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.5.1 — the progress bars fill brand-green and the colourMatik chameleon walks the leading edge (Match & Apply, MATCH ALL, and updates)."
+  "notes": "colourMatik 1.5.2 — the real chameleon walk-cycle animation now walks the progress bar as it fills green, buttons colour on hover, and MATCH ALL has its own distinct look."
 }
