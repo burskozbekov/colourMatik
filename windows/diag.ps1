@@ -122,7 +122,7 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
 
 # -- engine repair ------------------------------------------------------------
 # The smoking gun on the reported machine: install dir at 1.6.6 but the RUNNING
-# engine answering 0.2.0 — a leftover process from the very first install held
+# engine answering 0.2.0 - a leftover process from the very first install held
 # port 8765, so every newer engine died at bind and the ancient one kept
 # serving (no /update_now endpoint -> the panel could only download files; and
 # ancient matching code -> "everything is slow"). Kill anything matching, start
