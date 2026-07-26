@@ -8,8 +8,13 @@
 # after it — including the per-user After Effects panel, which needs no admin
 # at all. Every step is now independent and the admin ones are gated.
 set -uo pipefail
+# "Can we get admin?" is not "is sudo already cached" — a user running this in
+# Terminal CAN be prompted, and testing only `sudo -n` silently skipped the
+# effect for them (a regression against the previous behaviour). Ask whether a
+# prompt is possible at all: cached credentials OR an interactive terminal.
 CAN_SUDO=0
-sudo -n true 2>/dev/null && CAN_SUDO=1
+if sudo -n true 2>/dev/null || [ -t 0 ]; then CAN_SUDO=1; fi
+CM_SKIPPED=""
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$DIR/colourmatik-fx/colourMatik.plugin"
 # After Effects gets a variant with a DIFFERENT effect match name, so AE — which
@@ -26,7 +31,8 @@ SUDO=""
 if ! mkdir -p "$DESTDIR" 2>/dev/null || [ ! -w "$DESTDIR" ]; then
     echo "The Adobe plug-ins folder needs admin rights — you'll be asked for your Mac password."
     if [ "$CAN_SUDO" = "1" ]; then SUDO="sudo"; else
-      echo "  (skipping: needs admin and no password prompt is possible here)"; SUDO=""; SKIP_ADMIN=1
+      echo "  (skipping: needs admin and no password prompt is possible here)"
+      SUDO=""; CM_SKIPPED="yes"
     fi
     $SUDO mkdir -p "$DESTDIR"
 fi
@@ -51,7 +57,8 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     if [ ! -w "$AEPLUG" ] && [ -z "$SUDO" ]; then
         echo "After Effects plug-ins folder needs admin — you may be asked for your password."
         if [ "$CAN_SUDO" = "1" ]; then SUDO="sudo"; else
-      echo "  (skipping: needs admin and no password prompt is possible here)"; SUDO=""; SKIP_ADMIN=1
+      echo "  (skipping: needs admin and no password prompt is possible here)"
+      SUDO=""; CM_SKIPPED="yes"
     fi
     fi
     $SUDO mkdir -p "$AEPLUG/colourMatik"
@@ -92,3 +99,27 @@ for PF in "$HOME/Library/Preferences/Adobe/After Effects/"*/"Adobe After Effects
 done
 
 echo "Restart Premiere Pro / After Effects, then find it under Effects ▸ colourMatik ▸ colourMatik."
+
+# After Effects blocks scripts from writing files / reaching the network until
+# this preference is on. The Windows installer already flips it; without it the
+# AE panel cannot render frames for precomps, solids, text or shape layers and
+# reports a confusing "cannot create colourMatik/aeframes".
+for pref in "$HOME/Library/Preferences/Adobe/After Effects"/*/ ; do
+  [ -d "$pref" ] || continue
+  f="$pref/Adobe After Effects $(basename "$pref") Prefs-indep-general.txt"
+  [ -f "$f" ] || continue
+  if grep -q 'Pref_SCRIPTING_FILE_NETWORK_SECURITY' "$f" 2>/dev/null; then
+    /usr/bin/sed -i '' 's/"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "0"/"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "1"/' "$f" 2>/dev/null || true
+  else
+    printf '\n["Main Pref Section"]\n\t"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "1"\n' >> "$f" 2>/dev/null || true
+  fi
+  echo "Allowed AE scripts to write files / access the network ($(basename "$pref"))"
+done
+
+if [ -n "$CM_SKIPPED" ]; then
+  echo ""
+  echo "NOT EVERYTHING WAS INSTALLED: some folders needed admin rights and no"
+  echo "password could be asked for here. Run this in Terminal to finish:"
+  echo "  \"$DIR/install-effect.sh\""
+  exit 1
+fi

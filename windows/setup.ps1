@@ -36,12 +36,14 @@ $pip = ".\.venv\Scripts\pip.exe"
 & $pip install --quiet --upgrade pip
 
 Write-Host "==> Installing base engine deps"
-& $pip install --quiet -r requirements.txt
+& $pip install -r requirements.txt
+if ($LASTEXITCODE -ne 0) { throw "Installing the engine's dependencies failed - see the messages above." }
 
 if ($NoAI) { Write-Host "==> Skipping local AI (-NoAI). Classical engine ready."; exit 0 }
 
 Write-Host "==> Installing local-AI deps (PyTorch / transformers). A few hundred MB."
-& $pip install --quiet -r requirements-ai.txt
+& $pip install -r requirements-ai.txt
+if ($LASTEXITCODE -ne 0) { throw "Installing the AI dependencies failed - see the messages above." }
 # PyPI ships a CPU-only torch on Windows, so the NVIDIA path added in 1.5.3 was
 # unreachable for every downloader. Swap in the CUDA build when there is a card.
 $nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
@@ -67,3 +69,10 @@ if (-not (Test-Path $w) -or ((Get-Item $w).Length -lt 1000000)) {
 }
 Write-Host "==> Done. Start the engine with:  windows\colourmatik-app.cmd"
 Write-Host "    (First AI run also auto-downloads the SegFormer scene model, ~15MB.)"
+
+# Prove the environment can actually start before declaring success — a silent
+# pip failure used to leave a machine the installer called "complete" and the
+# panel could never connect to.
+& ".\.venv\Scripts\python.exe" -c "import fastapi, numpy, cv2" 2>$null
+if ($LASTEXITCODE -ne 0) { throw "The engine environment is incomplete (a dependency is missing)." }
+Write-Host "==> Engine environment verified."

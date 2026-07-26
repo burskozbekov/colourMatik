@@ -74,7 +74,14 @@ if (Test-Path $cepSrc) {
     try {
         $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
         if ($ex) { $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
-                   if ($owner.User) { $userProfile = "C:\Users\$($owner.User)" } }
+                   if ($owner.User) {
+                       # Never fabricate C:\Users\<account>: renamed accounts,
+                       # rebuilt profiles (john.DESKTOP-8KQ2), relocated profiles
+                       # and non-C: installs all break that assumption, and the
+                       # panel would be copied where After Effects never looks.
+                       $cand = Join-Path (Join-Path $env:SystemDrive "Users") $owner.User
+                       if (Test-Path $cand) { $userProfile = $cand }
+                     } }
     } catch {}
     $cepDest = Join-Path $userProfile "AppData\Roaming\Adobe\CEP\extensions\com.catheadai.colourmatik"
     if (Test-Path $cepDest) { Remove-Item -Recurse -Force $cepDest }
@@ -96,7 +103,14 @@ try {
     try {
         $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
         if ($ex) { $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
-                   if ($owner.User) { $userProfile = "C:\Users\$($owner.User)" } }
+                   if ($owner.User) {
+                       # Never fabricate C:\Users\<account>: renamed accounts,
+                       # rebuilt profiles (john.DESKTOP-8KQ2), relocated profiles
+                       # and non-C: installs all break that assumption, and the
+                       # panel would be copied where After Effects never looks.
+                       $cand = Join-Path (Join-Path $env:SystemDrive "Users") $owner.User
+                       if (Test-Path $cand) { $userProfile = $cand }
+                     } }
     } catch {}
     $aePrefRoot = Join-Path $userProfile "AppData\Roaming\Adobe\After Effects"
     if (Test-Path $aePrefRoot) {
