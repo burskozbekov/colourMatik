@@ -6,6 +6,17 @@
 
 Unicode true
 Name "colourMatik"
+; Stamp the real version on the installer itself. Without it Windows showed the
+; NSIS default (1.0.0) and macOS showed a frozen 1.2.0, so a user who checked
+; the DOWNLOADED FILE concluded the site was still serving an ancient build —
+; even though it installs the current one.
+VIProductVersion "1.6.6.0"
+VIAddVersionKey "ProductName" "colourMatik"
+VIAddVersionKey "ProductVersion" "1.6.6"
+VIAddVersionKey "FileVersion" "1.6.6"
+VIAddVersionKey "CompanyName" "catheadai"
+VIAddVersionKey "FileDescription" "colourMatik Setup"
+VIAddVersionKey "LegalCopyright" "Sevki Bugra Ozbek"
 OutFile "colourMatik-Setup.exe"
 InstallDir "$LOCALAPPDATA\colourMatik"
 RequestExecutionLevel admin
