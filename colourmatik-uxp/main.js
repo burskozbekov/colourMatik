@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.6.5";
+const LOCAL_VERSION = "1.6.6";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -910,3 +910,23 @@ async function autoUpdateCheck() {
   } catch (e) {}
 }
 setTimeout(autoUpdateCheck, 1500);
+
+/* The engine imports heavy AI libraries and takes ~30s to answer after login,
+ * install or an update — during which every call fails and the panel used to
+ * open straight into a scary red ERROR. Poll it on open and say what is
+ * actually happening; flip to READY the moment it answers. */
+(async function engineWait() {
+  for (let i = 0; i < 40; i++) {
+    try {
+      const r = await fetchT(SERVER + "/version", { cache: "no-cache" }, 2500);
+      const j = await r.json();
+      if (j && j.version) {
+        if (i > 0) setStatus("READY", "Engine is up (v" + j.version + "). Pick a reference and a target.", "idle");
+        return;
+      }
+    } catch (e) {}
+    if (i === 0) setStatus("STARTING", "colourMatik engine is starting - this takes about half a minute after login or an update...", "busy");
+    await _sleep(3000);
+  }
+  setStatus("ERROR", "The engine did not start. Open the colourMatik installer once, or run ./colourmatik-app in the colourMatik folder.", "error");
+})();

@@ -72,6 +72,24 @@ $Folder = $PluginId + "_" + $Version
 $Dest   = Join-Path $Ext $Folder
 
 function Remove-StaleColourMatik {
+    # Adobe's plugin agent keeps ITS OWN copy under UXP\PluginsStorage\PPRO\
+    # <version>\External\<id> — with NO version in the folder name — and
+    # Premiere loads THAT one when it is registered. The 1.2.0 installed there
+    # long ago survived every fix aimed at Plugins\External, which is exactly
+    # why a fresh website install kept reporting 1.2.0. Remove it everywhere;
+    # the agent reinstall (or the developer-mode copy) puts the current one back.
+    $storageRoot = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsStorage"
+    if (Test-Path $storageRoot) {
+        Get-ChildItem $storageRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                $stale = Join-Path $_.FullName "External\com.colourmatik.panel"
+                if (Test-Path $stale) {
+                    Write-Host ("    removing agent-installed panel: " + $stale)
+                    Remove-Item -Recurse -Force $stale -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
     # THE bug behind "I reinstalled and it still says 1.2.0": an older
     # <pluginId>_<version> folder, and its entry in Premiere's UXP registry,
     # survived every reinstall. Adobe's agent installs the new build elsewhere,
@@ -114,6 +132,11 @@ foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
 
 $installed = $false
 if ($upia) {
+    # Ask the agent to forget any previous colourMatik first — its database is
+    # the source Premiere trusts, and an old registration there outlives every
+    # file we delete by hand.
+    & $upia /remove com.colourmatik.panel 2>&1 | Select-String -Pattern "colourMatik|success|error" |
+        ForEach-Object { Write-Host ("    " + $_) }
     Write-Host "==> Installing the panel through Adobe's plugin agent..."
     # NOTE: on Windows UPIA takes /flags. The macOS form (--install) silently
     # no-ops here, which looks exactly like "the installer did nothing".

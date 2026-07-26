@@ -1,5 +1,5 @@
 {
-  "version": "1.6.5",
+  "version": "1.6.6",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.6.5 — Match & Apply is 44% faster (27.8s to 15.5s measured on a warm engine), and a latent bug is fixed where grey or flat-colour footage poisoned every safety fallback."
+  "notes": "colourMatik 1.6.6 — Windows finally stops resurrecting 1.2.0 (the old panel lived on in Adobe's own PluginsStorage and agent database, untouched by every earlier cleanup); the Mac installer now verifies the engine actually answers before claiming success; and the panel says 'engine is starting' instead of opening into a red error during the ~30s boot."
 }

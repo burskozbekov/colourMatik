@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.6.5";
+var LOCAL_VERSION = "1.6.6";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -609,3 +609,19 @@ function autoUpdateCheck() {
   }).catch(function () {});
 }
 setTimeout(autoUpdateCheck, 1500);
+
+/* Engine takes ~30s to boot after login/install/update; do not open into a
+ * scary error — poll and narrate, flip to READY when it answers. */
+(function engineWait(i) {
+  getJSON("/version", 2500).then(function (j) {
+    if (j && j.version) {
+      if (i > 0) setStatus("READY", "Engine is up (v" + j.version + "). Pick a reference and a target.", "idle");
+      return;
+    }
+    throw new Error("no");
+  }).catch(function () {
+    if (i === 0) setStatus("STARTING", "colourMatik engine is starting - this takes about half a minute after login or an update...", "busy");
+    if (i < 40) setTimeout(function () { engineWait(i + 1); }, 3000);
+    else setStatus("ERROR", "The engine did not start. Open the colourMatik installer once, or run ./colourmatik-app in the colourMatik folder.", "error");
+  });
+})(0);

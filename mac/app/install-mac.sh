@@ -160,8 +160,26 @@ PL
   /usr/sbin/chown "$CONSOLE_USER" "$PLIST"
   asuser /bin/launchctl bootout "gui/$USER_UID/com.colourmatik.engine" 2>/dev/null || true
   asuser /bin/launchctl bootstrap "gui/$USER_UID" "$PLIST" 2>/dev/null || \
-  asuser /bin/launchctl load "$PLIST" 2>/dev/null || true
-  echo "Engine autostart configured."
+  asuser /bin/launchctl load -w "$PLIST" 2>/dev/null || true
+  # "configured" is not "running": both launchctl forms can fail silently, and
+  # even a healthy engine needs ~30s of imports before it serves. Verify by
+  # ASKING it, fall back to a direct start, and never claim success blind —
+  # a reinstall that killed the service and could not restart it is exactly the
+  # "everything is broken and slow" report from the field.
+  ENGINE_OK=""
+  for i in $(seq 1 45); do
+    if /usr/bin/curl -s --max-time 2 "http://127.0.0.1:8765/version" >/dev/null 2>&1; then
+      ENGINE_OK=1; break
+    fi
+    [ "$i" = "15" ] && asuser /bin/launchctl kickstart "gui/$USER_UID/com.colourmatik.engine" 2>/dev/null || true
+    [ "$i" = "25" ] && asuser /bin/sh -c "cd '$DIR' && nohup ./.venv/bin/python -u -m colourmatik.webapp >> '$HOME_DIR/Library/Logs/colourmatik-engine.log' 2>&1 &" 2>/dev/null || true
+    sleep 2
+  done
+  if [ -n "$ENGINE_OK" ]; then
+    echo "Engine is up and answering."
+  else
+    echo "WARNING: the engine did not answer on 127.0.0.1:8765 — open the panel; it can take a minute after login."
+  fi
 fi
 
 # clean up the download
