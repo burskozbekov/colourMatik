@@ -1,5 +1,5 @@
 {
   "version": "1.5.3",
-  "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.5.3 — the AI steps now use an NVIDIA GPU when there is one, so Windows machines are no longer stuck on the processor."
+  "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
+  "notes": "colourMatik 1.5.3 — walking-chameleon progress bar, in-panel updates, 2.3x faster matching, fairer candidate judging, camera log formats and MATCH ALL. Older Windows installs: run the downloaded Setup once; every update after that happens inside the panel."
 }
