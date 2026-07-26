@@ -767,6 +767,62 @@ def diag(req: DiagReq):
     return {"ok": True}
 
 
+# ── The progress bar as a PICTURE ───────────────────────────────────────────
+# The panel host proved unable to render ANY layout we tried (stylesheet rules
+# ignored, inline geometry ignored, flex rows collapsed into overlap). Images at
+# natural size are the one thing it draws faithfully — so the whole bar (track,
+# green fill, walking chameleon frame) is composed HERE with PIL and handed to
+# the panel as a ready data-URL. The panel owns one <img> and nothing else.
+_BAR_W, _BAR_H = 300, 34
+_CHAM_FRAMES: list = []
+_BAR_CACHE: dict = {}
+
+
+def _load_cham_frames():
+    if _CHAM_FRAMES:
+        return _CHAM_FRAMES
+    from PIL import Image
+    base = Path(__file__).resolve().parents[1] / "colourmatik-uxp"
+    for i in range(18):
+        f = base / f"cham{i:02d}.png"
+        if f.exists():
+            _CHAM_FRAMES.append(Image.open(f).convert("RGBA"))
+    return _CHAM_FRAMES
+
+
+@app.get("/bardata")
+def bardata(pct: float = 0.0, f: int = 0):
+    import io as _io
+    from PIL import Image, ImageDraw
+    p = max(0.0, min(1.0, pct))
+    frames = _load_cham_frames()
+    fi = (f % len(frames)) if frames else 0
+    key = (round(p * 100), fi)
+    hit = _BAR_CACHE.get(key)
+    if hit is None:
+        img = Image.new("RGBA", (_BAR_W, _BAR_H), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([0, 10, _BAR_W - 1, _BAR_H - 11], radius=6, fill=(58, 63, 71, 255))
+        cham_w = frames[0].width if frames else 52
+        track = _BAR_W - cham_w
+        fill_w = int(track * p) + cham_w // 2
+        if fill_w > 0:
+            d.rounded_rectangle([0, 10, min(fill_w, _BAR_W - 1), _BAR_H - 11],
+                                radius=6, fill=(47, 181, 107, 255))
+        if frames:
+            ch = frames[fi]
+            x = int(track * p)
+            y = (_BAR_H - ch.height) // 2
+            img.paste(ch, (x, y), ch)
+        bio = _io.BytesIO()
+        img.save(bio, format="PNG", optimize=True)
+        hit = "data:image/png;base64," + _b64.b64encode(bio.getvalue()).decode()
+        _BAR_CACHE[key] = hit
+        while len(_BAR_CACHE) > 2200:
+            _BAR_CACHE.pop(next(iter(_BAR_CACHE)), None)
+    return {"ok": True, "img": hit}
+
+
 @app.get("/update_progress")
 def update_progress():
     """The updater writes "pct|message" here; the panel's bar polls it."""

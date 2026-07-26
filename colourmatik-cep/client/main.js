@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.6.1";
+var LOCAL_VERSION = "1.6.2";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -97,35 +97,23 @@ function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 var _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 /* 18 frames of the real walk-cycle artwork stacked in one sprite image. */
 var CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33, _chamFrame = 0;
-/* Progress bar in its own flex row under the button — see the Premiere panel
- * for why nothing here may rely on overlays, absolute positioning, percentage
- * widths or a stylesheet. */
-var CHAM_FRAMES = 18, CHAM_W = 52, _chamFrame = 0;
+/* The bar is a PICTURE the engine draws — see the Premiere panel. */
+var CHAM_FRAMES = 18, _chamFrame = 0, _barPct = 0, _barBusy = false;
 function _chamShow(on) {
-  var r = $("prog-row");
-  if (r) r.style.display = on ? "flex" : "none";
+  var i = $("prog-img");
+  if (i) i.style.display = on ? "block" : "none";
 }
 function _chamStep() {
-  var c = $("run-cham");
-  if (!c) return;
+  var i = $("prog-img");
+  if (!i || _barBusy) return;
+  _barBusy = true;
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
-  c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
+  getJSON("/bardata?pct=" + _barPct.toFixed(2) + "&f=" + _chamFrame, 2500).then(function (j) {
+    if (j && j.img) i.src = j.img;
+  }).then(function () { _barBusy = false; }, function () { _barBusy = false; });
 }
-function _paintFill(pct) {
-  var row = $("prog-row"), a = $("prog-fill"), b = $("prog-rest");
-  if (!row || !a || !b) return;
-  var p = Math.max(0, Math.min(1, pct));
-  var track = Math.max(0, (row.offsetWidth || 0) - CHAM_W);
-  if (track > 0) {
-    a.style.width = Math.round(track * p) + "px";
-    b.style.width = Math.round(track * (1 - p)) + "px";
-  } else {
-    a.style.flexGrow = String(Math.max(0.001, p));
-    b.style.flexGrow = String(Math.max(0.001, 1 - p));
-  }
-}
+function _paintFill(pct) { _barPct = Math.max(0, Math.min(1, pct)); }
 function _chamPlace(pct) { _paintFill(pct); }
-
 function _paintProg() {
   _paintFill(_dispPct);
   _chamPlace(_dispPct);
@@ -146,7 +134,7 @@ function startProgress(jobId) {
     }).then(function () { polling = false; }, function () { polling = false; });
   }, 500);
   _chamShow(true);
-  _chamTick = setInterval(_chamStep, 70);          // the walk itself
+  _chamTick = setInterval(_chamStep, 140);          // the walk itself
   _progTick = setInterval(function () {
     var soft = Math.min(0.97, _srvPct + 0.10);
     var target = Math.max(_srvPct, Math.min(soft, _dispPct + 0.006));
@@ -476,7 +464,7 @@ async function runSelfUpdate(fromVersion) {
   $("run").disabled = true;
   $("run").classList.add("loading");
   _chamShow(true);
-  var _ub = setInterval(_chamStep, 70);   // the chameleon walks while it updates
+  var _ub = setInterval(_chamStep, 140);   // the chameleon walks while it updates
   try {
     var j = await postJSON("/update_now", {}, 8000);
     if (!j || !j.ok) throw new Error((j && j.error) || "the engine couldn't start the update");

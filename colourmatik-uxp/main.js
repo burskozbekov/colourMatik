@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.6.1";
+const LOCAL_VERSION = "1.6.2";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -48,40 +48,30 @@ function refreshRun() {
 
 /* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
 let _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
-/* The progress bar lives in its own flex row UNDER the button — no overlay, no
- * absolute positioning, no percentage widths, no gradients, no clipping and no
- * stylesheet dependency, because the panel host honoured none of those: the
- * fill never painted and the sprite ignored its width/height entirely (it drew
- * at the file's natural size, which is why the frames are now authored at
- * exactly the size they must appear). Only flex + pixel widths + a background
- * colour + an <img> remain — the parts every host renders. */
-const CHAM_FRAMES = 18, CHAM_W = 52;
-let _chamFrame = 0;
+/* The bar is a PICTURE the engine draws (green fill + walking chameleon frame,
+ * composed with PIL at /bardata). Every layout technique we handed this host —
+ * stylesheet rules, inline pixel geometry, flex rows — was mis-rendered, but a
+ * data-URL image at natural size always drew correctly. So the panel owns ONE
+ * <img> and asks the engine for the next frame; nothing is laid out here. */
+const CHAM_FRAMES = 18;
+let _chamFrame = 0, _barPct = 0, _barBusy = false;
 function _chamShow(on) {
-  const r = $("prog-row");
-  if (r) r.style.display = on ? "flex" : "none";
+  const i = $("prog-img");
+  if (i) i.style.display = on ? "block" : "none";
 }
-function _chamStep() {
-  const c = $("run-cham");
-  if (!c) return;
+async function _chamStep() {
+  const i = $("prog-img");
+  if (!i || _barBusy) return;
+  _barBusy = true;
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
-  c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
+  try {
+    const r = await fetchT(SERVER + "/bardata?pct=" + _barPct.toFixed(2) + "&f=" + _chamFrame, { cache: "no-cache" }, 2500);
+    const j = await r.json();
+    if (j && j.img) i.src = j.img;
+  } catch (e) {} finally { _barBusy = false; }
 }
-function _paintFill(pct) {
-  const row = $("prog-row"), a = $("prog-fill"), b = $("prog-rest");
-  if (!row || !a || !b) return;
-  const p = Math.max(0, Math.min(1, pct));
-  const w = row.offsetWidth || 0;
-  const track = Math.max(0, w - CHAM_W);
-  if (track > 0) {
-    a.style.width = Math.round(track * p) + "px";
-    b.style.width = Math.round(track * (1 - p)) + "px";
-  } else {                       // host reports no metrics -> let flex share it
-    a.style.flexGrow = String(Math.max(0.001, p));
-    b.style.flexGrow = String(Math.max(0.001, 1 - p));
-  }
-}
-function _chamPlace(pct) { _paintFill(pct); }   // the row's flow does the walking
+function _paintFill(pct) { _barPct = Math.max(0, Math.min(1, pct)); }
+function _chamPlace(pct) { _paintFill(pct); }
 /* One-shot report of what the host ACTUALLY laid out, so a failure is diagnosed
  * from measurements instead of guesses. */
 let _diagSent = false;
@@ -90,12 +80,9 @@ function _sendDiag() {
   _diagSent = true;
   try {
     const g = (id) => { const e = $(id); return e ? { w: e.offsetWidth, h: e.offsetHeight } : null; };
-    const c = $("run-cham");
     fetchT(SERVER + "/diag", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host: "premiere", version: LOCAL_VERSION,
-        row: g("prog-row"), fill: g("prog-fill"), rest: g("prog-rest"),
-        cham: g("run-cham"), chamNatural: c ? { w: c.naturalWidth, h: c.naturalHeight } : null,
-        chamSrc: c ? String(c.src).split("/").pop() : null,
+        bar: g("prog-img"),
         btn: g("run") }) }, 4000).catch(() => {});
   } catch (e) {}
 }
@@ -125,7 +112,7 @@ function startProgress(jobId) {
   // Smoothly ease toward the server value, and gently creep forward within a
   // stage so the bar never looks frozen during the long AI steps.
   _chamShow(true);
-  _chamTick = setInterval(_chamStep, 70);          // the walk itself
+  _chamTick = setInterval(_chamStep, 140);          // the walk itself
   setTimeout(_sendDiag, 900);                      // report the real layout once
   _progTick = setInterval(() => {
     const soft = Math.min(0.97, _srvPct + 0.10);
@@ -769,7 +756,7 @@ async function runSelfUpdate(fromVersion) {
   $("run").disabled = true;
   $("run").classList.add("loading");
   _chamShow(true);
-  const _ub = setInterval(_chamStep, 70);   // the chameleon walks while it updates
+  const _ub = setInterval(_chamStep, 140);   // the chameleon walks while it updates
   try {
     const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
     const j = await r.json().catch(() => ({ ok: false }));
