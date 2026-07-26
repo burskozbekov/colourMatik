@@ -71,10 +71,15 @@ jobs:
           Copy-Item $aex.FullName out/colourMatik.aex
           # AE variant: same binary with the match name patched (both 21 bytes),
           # so After Effects doesn't flag a duplicate against Premiere's copy.
+          # Latin-1, NOT ASCII: ASCII round-tripping turns every byte >127 into
+          # "?" and would hand out a corrupted DLL. Latin-1 maps all 256 values
+          # 1:1, so the patch touches only the name.
+          $enc = [Text.Encoding]::GetEncoding(28591)
           $b = [IO.File]::ReadAllBytes("out/colourMatik.aex")
-          $s = [Text.Encoding]::ASCII.GetString($b)
-          $s = $s.Replace("catheadai colourMatik", "catheadaiAEcolorMatik")
-          [IO.File]::WriteAllBytes("out/colourMatik-ae.aex", [Text.Encoding]::ASCII.GetBytes($s))
+          $s = $enc.GetString($b).Replace("catheadai colourMatik", "catheadaiAEcolorMatik")
+          $o = $enc.GetBytes($s)
+          if ($o.Length -ne $b.Length) { throw "AE patch changed the binary length." }
+          [IO.File]::WriteAllBytes("out/colourMatik-ae.aex", $o)
           Compress-Archive -Force out/colourMatik.aex,out/colourMatik-ae.aex out/colourMatik-effect-windows.zip
           Write-Host "Built: $($aex.FullName) -> out/colourMatik.aex"
 
