@@ -102,6 +102,36 @@ def _encode_flow_weights(enc_img: np.ndarray):
     return e
 
 
+def _encode_flow_weights_pair(a: np.ndarray, b: np.ndarray):
+    """Encode two frames in ONE batch (falls back to per-image cache hits)."""
+    import hashlib, torch
+    from PIL import Image
+    model, tfm, device = _load()
+    keys, prepped, out = [], [], [None, None]
+    for i, img in enumerate((a, b)):
+        small = (np.clip(img[::7, ::7], 0, 1) * 255).astype(np.uint8)
+        k = hashlib.blake2b(small.tobytes(), digest_size=16).hexdigest()
+        keys.append(k)
+        hit = _ENC_CACHE.get(k)
+        if hit is not None:
+            out[i] = hit
+        else:
+            im = Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)).resize((_INPUT, _INPUT))
+            arr = np.asarray(im, dtype=np.float32) / 255.0
+            prepped.append((i, torch.tensor(arr.reshape(3, _INPUT, _INPUT))))
+    if prepped:
+        with torch.no_grad():
+            batch = torch.stack([tfm(x) for _, x in prepped]).to(device)
+            es = model(batch).to("cpu")
+        for j, (i, _) in enumerate(prepped):
+            e = es[j].flatten()
+            out[i] = e
+            _ENC_CACHE[keys[i]] = e
+            while len(_ENC_CACHE) > 24:
+                _ENC_CACHE.pop(next(iter(_ENC_CACHE)), None)
+    return out[0], out[1]
+
+
 class _Flow:
     """The tiny per-image flow MLP, weights set from the encoder's output."""
 
@@ -148,8 +178,10 @@ def modflows_lut(src_enc: np.ndarray, ref_enc: np.ndarray, size: int = 65,
     try:
         import torch
         _, _, device = _load()
-        e_src = _encode_flow_weights(src_enc)
-        e_ref = _encode_flow_weights(ref_enc)
+        # One batched forward pass instead of two: the encoder is the expensive
+        # half of this candidate, and MPS handles a batch of 2 in barely more
+        # time than a batch of 1. Cache still applies per image.
+        e_src, e_ref = _encode_flow_weights_pair(src_enc, ref_enc)
         f_src = _Flow(e_src, device)
         f_ref = _Flow(e_ref, device)
         ax = np.linspace(0.0, 1.0, size, dtype=np.float32)

@@ -117,6 +117,24 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         _rt = Image.fromarray((np.clip(tgt_enc, 0, 1) * 255 + 0.5).astype("uint8"))
         tgt_enc = np.asarray(_rt.resize((w, h))).astype(np.float64) / 255.0
 
+    # "Same scene" clicked for two DIFFERENT shots is the single most damaging
+    # misuse: corresponded matching pairs pixels BY POSITION, so unaligned frames
+    # produce a garbage mapping that still "wins" its own contest (seen in the
+    # field: MKL crowned at dE00 26). Detect it — structural correlation of the
+    # two frames at 64px — and quietly fall back to distribution matching.
+    if corresponded:
+        from PIL import Image as _Im
+        def _tiny_gray(a):
+            g = _Im.fromarray((np.clip(a, 0, 1) * 255 + 0.5).astype("uint8")).convert("L")
+            return np.asarray(g.resize((64, 64)), dtype=np.float64).ravel()
+        ga, gb = _tiny_gray(src_enc), _tiny_gray(tgt_enc)
+        ga -= ga.mean(); gb -= gb.mean()
+        denom = float(np.sqrt((ga * ga).sum() * (gb * gb).sum()))
+        corr = float((ga * gb).sum() / denom) if denom > 1e-9 else 0.0
+        if corr < 0.45:
+            corresponded = False
+        _CORR_PRECHECK = corr
+
     S_lin = cs.decode(src_enc, tf).reshape(-1, 3)
     T_lin = cs.decode(tgt_enc, tf).reshape(-1, 3)
     S_enc = src_enc.reshape(-1, 3)
@@ -382,6 +400,23 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         res.notes.append("Distribution mode: matched colour distributions "
                          "(no per-pixel ground truth).")
     _p(1.0, "Match complete")
+    # Outcome-based safety net for a mis-clicked "Same scene": if the winning
+    # corresponded mapping is still catastrophically wrong (dE00 > 8 means the
+    # frames were never really aligned — the field report showed MKL "winning"
+    # at 26), redo the whole match as distribution matching. Costs a second pass
+    # only in the broken case; an honest match on aligned frames scores ~0-3.
+    if (corresponded and res.de_after is not None
+            and res.de_after.get("mean", 0.0) > 8.0):
+        res = match(src_enc, tgt_enc, corresponded=False, tf=tf, size=size,
+                    degrees=degrees, lattice_L=lattice_L, sample=sample,
+                    seed=seed, skin_protect=skin_protect, skin_weight=skin_weight,
+                    neural=neural, look=look, refine=refine, quick=quick,
+                    progress=progress)
+        res.notes.append("Same-scene mode produced a poor aligned match "
+                         f"(dE00 {res.de_after['mean']:.1f} before fallback); "
+                         "re-matched as different scenes.")
+        return res
+
     return res
 
 

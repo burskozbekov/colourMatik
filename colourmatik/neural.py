@@ -91,11 +91,22 @@ def _to_u8(enc: np.ndarray) -> np.ndarray:
     return (np.clip(enc, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
+_SEG_CACHE: dict = {}      # content hash -> label map (MATCH ALL reuses the
+                            # same reference for every group; ~7MB per entry)
+
+
 def _segment(enc: np.ndarray) -> np.ndarray | None:
     """enc: (H,W,3) display-encoded float [0,1] -> (H,W) int label map, or None."""
     seg = _load_seg()
     if seg is None:
         return None
+    import hashlib
+    small = (np.clip(enc[::7, ::7], 0, 1) * 255).astype(np.uint8)
+    key = (hashlib.blake2b(small.tobytes(), digest_size=16).hexdigest(),
+           enc.shape[0], enc.shape[1])
+    hit = _SEG_CACHE.get(key)
+    if hit is not None:
+        return hit
     import torch
     from PIL import Image
     model, proc, device = seg
@@ -125,15 +136,22 @@ def _segment(enc: np.ndarray) -> np.ndarray | None:
                              dtype=np.int32)
         return lab
 
+    def _remember_seg(lab):
+        if lab is not None:
+            _SEG_CACHE[key] = lab
+            while len(_SEG_CACHE) > 8:
+                _SEG_CACHE.pop(next(iter(_SEG_CACHE)), None)
+        return lab
+
     with _SEG_LOCK:                                   # serialize inference on the shared model
         try:
-            return _run(device)
+            return _remember_seg(_run(device))
         except Exception:                             # e.g. an MPS-unsupported op -> retry on CPU
             if device == "cpu":
                 return None
             try:
                 model.to("cpu")
-                return _run("cpu")
+                return _remember_seg(_run("cpu"))
             except Exception:
                 return None
             finally:
