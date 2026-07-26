@@ -101,23 +101,28 @@ function Remove-StaleColourMatik {
             Write-Host ("    removing stale panel: " + $_.Name)
             Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
         }
-    $reg = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1\premierepro.json"
-    if (Test-Path $reg) {
-        try {
-            $j = Get-Content $reg -Raw | ConvertFrom-Json
-            if ($j.plugins) {
-                $keep = @($j.plugins | Where-Object {
-                    -not ($_.pluginId -eq $PluginId -and $_.versionString -ne $Version)
-                })
-                if ($keep.Count -ne @($j.plugins).Count) {
-                    Write-Host "    removing stale panel registration(s)"
-                    $j.plugins = $keep
-                    # No BOM: Premiere refuses to parse this file with one.
-                    [IO.File]::WriteAllText($reg, ($j | ConvertTo-Json -Depth 10),
-                                            (New-Object Text.UTF8Encoding $false))
+    # EVERY registry json, not just premierepro.json: the Premiere BETA keeps its
+    # own file here, and a stale registration in it kept resurrecting 1.2.0 for
+    # anyone opening the Beta.
+    $regDir = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1"
+    if (Test-Path $regDir) {
+        Get-ChildItem $regDir -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                if ($j.plugins) {
+                    $keep = @($j.plugins | Where-Object {
+                        -not ($_.pluginId -eq $PluginId -and $_.versionString -ne $Version)
+                    })
+                    if ($keep.Count -ne @($j.plugins).Count) {
+                        Write-Host ("    removing stale registration(s) in " + $_.Name)
+                        $j.plugins = $keep
+                        # No BOM: Premiere refuses to parse this file with one.
+                        [IO.File]::WriteAllText($_.FullName, ($j | ConvertTo-Json -Depth 10),
+                                                (New-Object Text.UTF8Encoding $false))
+                    }
                 }
-            }
-        } catch { Write-Warning "Could not tidy the UXP registry ($_)." }
+            } catch { Write-Warning ("Could not tidy " + $_.Name + " ($_).") }
+        }
     }
 }
 Remove-StaleColourMatik
