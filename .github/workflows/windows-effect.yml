@@ -50,17 +50,32 @@ jobs:
       - name: Build
         shell: pwsh
         run: |
-          msbuild "$env:PROJ" /m /p:Configuration=Debug /p:Platform=x64 `
+          # RELEASE: a Debug .aex links VCRUNTIME140D.dll / ucrtbased.dll, which
+          # exist only on machines with Visual Studio — it would never load for a
+          # real user. The SDK targets also refuse to build without an output dir.
+          $outDir = Join-Path $env:GITHUB_WORKSPACE "aeout"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $env:AE_PLUGIN_BUILD_DIR = $outDir
+          msbuild "$env:PROJ" /m /p:Configuration=Release /p:Platform=x64 `
+            /p:AE_PLUGIN_BUILD_DIR="$outDir" `
             /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 `
             /p:TreatWarningsAsErrors=false
-          $aex = Get-ChildItem "$env:SAMPLE_DIR" -Recurse -Include *.aex |
+          $aex = Get-ChildItem $outDir -Recurse -Include *.aex -ErrorAction SilentlyContinue |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $aex) { $aex = Get-ChildItem "$env:SAMPLE_DIR" -Recurse -Include *.aex |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
           if (-not $aex) { $aex = Get-ChildItem sdk -Recurse -Include *.aex |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1 }
           if (-not $aex) { throw "No .aex produced - check the build log above." }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item $aex.FullName out/colourMatik.aex
-          Compress-Archive -Force out/colourMatik.aex out/colourMatik-effect-windows.zip
+          # AE variant: same binary with the match name patched (both 21 bytes),
+          # so After Effects doesn't flag a duplicate against Premiere's copy.
+          $b = [IO.File]::ReadAllBytes("out/colourMatik.aex")
+          $s = [Text.Encoding]::ASCII.GetString($b)
+          $s = $s.Replace("catheadai colourMatik", "catheadaiAEcolorMatik")
+          [IO.File]::WriteAllBytes("out/colourMatik-ae.aex", [Text.Encoding]::ASCII.GetBytes($s))
+          Compress-Archive -Force out/colourMatik.aex,out/colourMatik-ae.aex out/colourMatik-effect-windows.zip
           Write-Host "Built: $($aex.FullName) -> out/colourMatik.aex"
 
       - name: Upload artifact

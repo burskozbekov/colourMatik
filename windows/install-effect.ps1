@@ -22,9 +22,14 @@ if ($local) {
     $ext = Join-Path $env:TEMP "colourMatik-effect-win"
     if (Test-Path $ext) { Remove-Item -Recurse -Force $ext }
     Expand-Archive $tmp $ext
-    $aex = Get-ChildItem $ext -Recurse -Filter "*.aex" | Select-Object -First 1
+    # The zip carries BOTH builds now, so pick by exact name — a bare *.aex
+    # match could hand Premiere the AE variant (wrong match name).
+    $aex = Get-ChildItem $ext -Recurse -Filter "colourMatik.aex" | Select-Object -First 1
     if (-not $aex) { throw "colourMatik.aex not found in the release zip." }
     $Src = $aex.FullName
+    $aeFromZip = Get-ChildItem $ext -Recurse -Filter "colourMatik-ae.aex" |
+                 Select-Object -First 1
+    if ($aeFromZip) { $AeSrcFromZip = $aeFromZip.FullName }
 }
 
 # 1) Premiere Pro / Media Encoder: the shared MediaCore folder.
@@ -48,6 +53,7 @@ foreach ($aeRoot in $aeRoots) {
             # AE gets the distinct-match-name variant (avoids AE's "duplicated
             # effect plugin" warning); falls back to the main build if absent.
             $aeSrc = @("$Root\colourmatik-fx\colourMatik-ae.aex", "$Root\windows\colourMatik-ae.aex") | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $aeSrc -and $AeSrcFromZip) { $aeSrc = $AeSrcFromZip }   # downloaded install
             if (-not $aeSrc) { $aeSrc = $Src }
             Copy-Item $aeSrc $aeDest -Force
             Unblock-File $aeDest -ErrorAction SilentlyContinue
