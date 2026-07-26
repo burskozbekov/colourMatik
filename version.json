@@ -1,5 +1,5 @@
 {
-  "version": "1.4.2",
+  "version": "1.4.3",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.4.2 — slider values are clean integers (UXP float leak fixed) and the AI models pre-download in the background at engine start, so the first match never looks frozen."
+  "notes": "colourMatik 1.4.3 — all-angles hardening: two security fixes, memory/fd leak fixes, update-vs-match isolation, MATCH ALL parameter freezing, stale-response guards, multi-line layer name support."
 }

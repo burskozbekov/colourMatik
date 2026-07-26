@@ -41,6 +41,21 @@ def available() -> bool:
     return _load_seg() is not None
 
 
+def loaded_nowait() -> bool:
+    """True only if the model is usable RIGHT NOW, without waiting.
+
+    While the startup warmup downloads EoMT (~1.2GB) it holds _SEG_LOCK; a match
+    calling _load_seg() then would block on that lock for minutes — the exact
+    frozen-bar stall the warmup exists to prevent. This check never blocks: if a
+    load is in flight, the caller just skips the AI candidate for this match."""
+    if _SEG is not None:
+        return _SEG is not False
+    if _SEG_LOCK.acquire(blocking=False):        # nothing loading -> load now
+        _SEG_LOCK.release()
+        return _load_seg() is not None
+    return False                                  # warmup in flight -> skip
+
+
 def _load_seg():
     global _SEG
     if _SEG is not None:

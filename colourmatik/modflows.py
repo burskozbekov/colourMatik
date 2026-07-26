@@ -60,6 +60,16 @@ def available() -> bool:
     return _load() is not None
 
 
+def loaded_nowait() -> bool:
+    """Usable right now, without blocking on a warmup download (see neural.py)."""
+    if _ENC is not None:
+        return _ENC is not False
+    if _LOCK.acquire(blocking=False):
+        _LOCK.release()
+        return _load() is not None
+    return False
+
+
 def _encode_flow_weights(enc_img: np.ndarray):
     """enc_img: (H,W,3) float [0,1] -> flat (8195,) flow weights tensor."""
     import torch

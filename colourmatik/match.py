@@ -184,6 +184,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         if neural:
             try:
                 from . import modflows as mf_mod
+                if not mf_mod.loaded_nowait():
+                    raise ImportError("modflows still warming up — skip this round")
                 _p(0.30, "Neural flow match")
                 mflut = mf_mod.modflows_lut(src_enc, tgt_enc, size=size)
                 if mflut is not None:
@@ -215,6 +217,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         if neural:
             try:
                 from . import neural as nn_mod
+                if not nn_mod.loaded_nowait():
+                    raise ImportError("segmentation still warming up — skip this round")
                 _p(0.35, "AI scene analysis")
                 nctx = nn_mod.prepare(src_enc, tgt_enc, tf, size=size,
                                       lattice_L=lattice_L, seed=seed)

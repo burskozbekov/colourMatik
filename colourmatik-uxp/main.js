@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.4.2";
+const LOCAL_VERSION = "1.4.3";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -42,7 +42,7 @@ function currentLook() {
 }
 
 function refreshRun() {
-  $("run").disabled = !(state.refPath && state.srcPath);
+  $("run").disabled = !(state.refPath && state.srcPath) || _updating || _matchingAll;
   try { refreshRunAll(); } catch (e) {}
 }
 
@@ -150,6 +150,7 @@ async function getSelected() {
 function baseName(p) { return p ? p.split(/[\\/]/).pop() : ""; }   // mac + windows paths
 
 async function captureRef() {
+  if (_matchingAll) return setStatus("MATCH ALL", "Batch matching is running — wait for it to finish.", "busy");
   try {
     const s = await getSelected();
     if (!s.path) return setStatus("SELECT", "Select the reference clip (bin or timeline), then click again.", "error");
@@ -163,6 +164,7 @@ async function captureRef() {
 }
 
 async function captureSrc() {
+  if (_matchingAll) return setStatus("MATCH ALL", "Batch matching is running — wait for it to finish.", "busy");
   try {
     const s = await getSelected();
     if (!s.path) return setStatus("SELECT", "Select the target clip on the timeline, then click again.", "error");
@@ -231,8 +233,12 @@ async function applyEffect(trackItem, slot, intensityPct) {
 
 /* ---- Match & Apply -------------------------------------------------------- */
 let _runGen = 0;   // generation token: a newer run() invalidates an older one's cleanup
+let _matchBusy = false;   // a match is in flight (draft or full)
 async function run() {
+  if (_updating) return setStatus("UPDATE", "Updating colourMatik — matching is paused until it finishes.", "busy");
+  if (_matchingAll) return setStatus("MATCH ALL", "Batch matching is running — wait for it to finish.", "busy");
   const gen = ++_runGen;
+  _matchBusy = true;
   // Snapshot the target NOW. The match takes seconds to minutes and the user can
   // re-capture meanwhile (the eyedropper stays live) — this run must apply to the
   // clip it was started for, not whatever was captured last.
@@ -351,6 +357,15 @@ async function run() {
         // The .catch() keeps a post-timeout rejection from surfacing as unhandled.
         const applying = applyEffect(tgt.trackItem, slot, DEFAULT_INTENSITY);
         applying.catch(() => {});
+        // If this call resolves LATE (after the 6s race), the user may have
+        // already switched look / dragged sliders; re-assert their CURRENT
+        // choice so the stale apply can't silently revert it.
+        applying.then(() => {
+          if (state.slot != null && state.slot !== slot && tgt.trackItem) {
+            const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
+            applyEffect(tgt.trackItem, state.slot, pct).catch(() => {});
+          }
+        }).catch(() => {});
         await Promise.race([
           applying,
           new Promise((_, rej) => setTimeout(() => rej(new Error("apply-timeout")), 6000)),
@@ -370,6 +385,7 @@ async function run() {
   } finally {
     // only the newest run may touch the shared bar/button state
     if (gen === _runGen) {
+      _matchBusy = false;
       if (!ok) stopProgress(false);   // error before the match resolved -> clear the bar
       refreshRun();
     }
@@ -389,6 +405,7 @@ async function loadLibrary() {
       d.className = "lib-item"; d.title = it.name;
       d.innerHTML = '<img src="' + it.thumb + '"><span class="lib-x">&times;</span>';
       d.addEventListener("click", () => {
+        if (_matchingAll) return;               // batch params are frozen
         state.refPath = it.path; state.refIn = null; state.refOut = null;
         $("refName").textContent = it.name; $("refName").className = "slot-name set";
         refreshRun();
@@ -451,7 +468,7 @@ async function loadWipe(rid, gen) {
 
 /* ---- MATCH ALL: every clip on the timeline, grouped, one LUT per group ---- */
 let _matchingAll = false;
-function refreshRunAll() { $("run-all").disabled = !(state.refPath) || _matchingAll; }
+function refreshRunAll() { $("run-all").disabled = !(state.refPath) || _matchingAll || _updating; }
 async function getAllVideoClips() {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("No project is open.");
@@ -493,7 +510,18 @@ async function getAllVideoClips() {
 async function matchAll() {
   if (_matchingAll) return;
   if (!state.refPath) return setStatus("SELECT", "Pick a REFERENCE first.", "error");
-  _matchingAll = true; refreshRunAll();
+  if (_updating) return setStatus("UPDATE", "Updating — try MATCH ALL when it finishes.", "busy");
+  if (_matchBusy) return setStatus("MATCHING", "A match is running — wait for it first.", "busy");
+  _matchingAll = true; refreshRunAll(); refreshRun();
+  // Freeze every parameter NOW: gallery clicks / toggles / tf changes during the
+  // minutes-long batch must not re-aim the remaining groups.
+  const B = { refPath: state.refPath, refIn: state.refIn, refOut: state.refOut,
+              look: currentLook(), tf: ($("tf") && $("tf").value) || "sRGB" };
+  // stale single-match controls would operate on an evicted rid — clear them
+  $("alts").className = "hidden"; $("alts").innerHTML = "";
+  $("wipe").className = "hidden";
+  $("intensity-section").className = "section hidden";
+  state.slot = null; state.rid = null;
   const btn = $("run-all");
   try {
     setStatus("SCAN", "Reading the timeline…", "busy");
@@ -506,6 +534,7 @@ async function matchAll() {
     const gj = await gr.json();
     if (!gj.ok) throw new Error(gj.error || "grouping failed");
     const groups = gj.groups;
+    const skipped = (gj.failed ? gj.failed.length : 0) + (gj.truncated || 0);
     let done = 0, applied = 0;
     for (const g of groups) {
       done++;
@@ -521,11 +550,11 @@ async function matchAll() {
         const mr = await fetchT(SERVER + "/match_paths", { method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            source_path: rep.path, reference_path: state.refPath,
-            mode: "different", tf: ($("tf") && $("tf").value) || "sRGB",
-            frames: 7, look: currentLook(),
+            source_path: rep.path, reference_path: B.refPath,
+            mode: "different", tf: B.tf,
+            frames: 7, look: B.look,
             source_in: rep.inS, source_out: rep.outS,
-            reference_in: state.refIn, reference_out: state.refOut,
+            reference_in: B.refIn, reference_out: B.refOut,
           }) }, 300000);
         const mj = await mr.json();
         if (!mj.ok) continue;
@@ -539,7 +568,9 @@ async function matchAll() {
         }
       } catch (e) {}
     }
-    setStatus("DONE", "Matched " + applied + "/" + clips.length + " clips in " + groups.length + " groups — same-look shots share one LUT (no pops at cuts).", "done");
+    setStatus("DONE", "Matched " + applied + "/" + clips.length + " clips in " + groups.length + " groups" +
+      (skipped ? " (" + skipped + " clip" + (skipped > 1 ? "s" : "") + " skipped — offline media or over the 60-clip limit)" : "") +
+      " — same-look shots share one LUT (no pops at cuts).", "done");
   } catch (e) {
     setStatus("ERROR", String(e.message || e), "error");
   } finally {
@@ -571,6 +602,7 @@ async function loadAlts(rid, tgt, gen) {
           }, 30000);
           const ej = await res.json();
           if (!ej.ok) throw new Error(ej.error || "variant failed");
+          if (gen !== _runGen) return;          // a newer run owns the UI now
           state.slot = ej.slot;
           const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
           if (tgt.trackItem) { try { await applyEffect(tgt.trackItem, ej.slot, pct); } catch (e) {} }
@@ -605,8 +637,9 @@ function onAxis() {
 }
 async function applyAxes() {
   if (!state.rid || state.slot == null) return;
+  const gen = _runGen, rid = state.rid;      // stale completions must not re-arm
   try {
-    const body = { rid: state.rid,
+    const body = { rid: rid,
       wb: Math.round(parseFloat($("ax-wb").value) || 100) / 100,
       tone: Math.round(parseFloat($("ax-tone").value) || 100) / 100,
       color: Math.round(parseFloat($("ax-color").value) || 100) / 100 };
@@ -614,6 +647,7 @@ async function applyAxes() {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, 30000);
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || "strength failed");
+    if (gen !== _runGen || rid !== state.rid) return;   // a new match owns the clip now
     state.slot = j.slot;
     const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
     if (state.srcTrackItem) { try { await applyEffect(state.srcTrackItem, j.slot, pct); } catch (e) {} }
@@ -656,6 +690,10 @@ const _sleep = (ms) => new Promise((res) => setTimeout(res, ms));
  * version and call it done. */
 async function runSelfUpdate(fromVersion) {
   if (_updating) return;
+  if (_matchBusy || _matchingAll) {             // never restart the engine mid-match
+    setTimeout(() => autoUpdateCheck(), 60000);
+    return;
+  }
   _updating = true;
   const el = $("update-link");
   $("run").disabled = true;

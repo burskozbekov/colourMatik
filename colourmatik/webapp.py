@@ -63,6 +63,12 @@ async def _block_foreign_websites(request, call_next):
     Origin header on cross-origin requests; the UXP panel and local tools send
     none (or a non-http scheme). Block only http(s) origins that aren't local."""
     origin = request.headers.get("origin", "")
+    # A LOCAL html file opened in a browser sends Origin: null — that is still a
+    # web page driving the engine (arbitrary path reads, library deletion,
+    # updater launches). The panels never send "null": UXP fetch sends no
+    # Origin, and the CEP panel talks over Node http.
+    if origin == "null":
+        return JSONResponse({"ok": False, "error": "forbidden origin"}, status_code=403)
     if origin.startswith(("http://", "https://")):
         host = origin.split("//", 1)[1].split("/", 1)[0].split(":", 1)[0].lower()
         if host not in ("127.0.0.1", "localhost", "[::1]"):
@@ -85,6 +91,19 @@ def _set_progress(job_id, pct, msg):
             _PROGRESS.pop(next(iter(_PROGRESS)), None)
 _LOCK = threading.Lock()     # serialize LUT-folder writes (avoid concurrent-write races)
 _MAX_CACHE = 12              # cap the in-memory caches — each job holds a LUT + frames + alt LUTs (~10MB)
+
+
+def _touch_job(rid: str):
+    """Move a just-used job to the end of the eviction order (LRU behaviour) —
+    a MATCH ALL burst must not evict the hero match whose sliders/alts the user
+    still has on screen."""
+    with _LOCK:
+        j = _JOBS.pop(rid, None)
+        if j is not None:
+            _JOBS[rid] = j
+        c = _RESULTS.pop(rid, None)
+        if c is not None:
+            _RESULTS[rid] = c
 
 
 def _remember(rid: str, cube: Path, job: dict | None = None) -> None:
@@ -278,7 +297,18 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
         preview, db, da = _preview_dataurl(ref1, src1, matched1, tf, corresponded, job)
 
     rid = uuid.uuid4().hex
-    _remember(rid, cube, {"lut": res.lut, "tf": tf, "src1": src1, "ref1": ref1,
+    # Store SMALL COPIES of the frames. src1/ref1 are numpy VIEWS into the full
+    # multi-frame decode stack — keeping them pinned the whole 7-frame float64
+    # stack (~350MB per 1080p side, GBs at 4K) alive per cached job. The wipe
+    # and alt thumbnails never need more than ~720px.
+    def _small(img):
+        from PIL import Image as _Im
+        h, w = img.shape[:2]
+        tw = min(720, w); th = max(1, int(h * tw / max(w, 1)))
+        arr = _Im.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).resize((tw, th))
+        return (np.asarray(arr, dtype=np.float32) / 255.0)
+    _remember(rid, cube, {"lut": res.lut, "tf": tf,
+                          "src1": _small(src1), "ref1": _small(ref1),
                           "corresponded": corresponded, "alts": res.alts,
                           "scores": res.scores, "method": res.method,
                           "s_lin": res.sample_src_lin, "t_lin": res.sample_tgt_lin})
@@ -469,6 +499,7 @@ def alts(rid: str):
     """The top candidate looks for a finished match, as small before-preview
     thumbnails. The panel renders them as a clickable row; /effect_lut with
     variant=<key> then bakes the chosen one."""
+    _touch_job(rid)
     j = _JOBS.get(rid)
     if j is None:
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
@@ -481,13 +512,13 @@ def alts(rid: str):
         base = np.asarray(Image.fromarray(
             (np.clip(src1, 0, 1) * 255 + 0.5).astype("uint8")).resize((tw, th)),
             dtype=np.float64) / 255.0
+        import io as _io
         out = []
         for name, alt in (j.get("alts") or {}).items():
             img = apply_lut(base, np.asarray(alt, dtype=np.float64))
-            buf = Path(tempfile.mkstemp(suffix=".jpg")[1])
-            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(buf, quality=82)
-            data = "data:image/jpeg;base64," + _b64.b64encode(buf.read_bytes()).decode()
-            buf.unlink(missing_ok=True)
+            bio = _io.BytesIO()   # in-memory: mkstemp leaked one fd per thumbnail
+            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(bio, format="JPEG", quality=82)
+            data = "data:image/jpeg;base64," + _b64.b64encode(bio.getvalue()).decode()
             out.append({"key": name, "label": _method_label(name),
                         "score": float((j.get("scores") or {}).get(name.partition("+")[0], 0.0)),
                         "preview": data,
@@ -502,6 +533,7 @@ def alts(rid: str):
 def effect_lut(req: EffectLutReq):
     """Write the match as a 65^3 .cube into a fresh slot the native colourMatik
     effect reads (full engine precision). Returns the slot number for the panel."""
+    _touch_job(req.rid)
     j = _JOBS.get(req.rid)
     if j is None:
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
@@ -542,6 +574,7 @@ def effect_lut(req: EffectLutReq):
 @app.get("/wipe/{rid}")
 def wipe(rid: str):
     """Before/after frames of the CURRENT look for the panel's A/B wipe."""
+    _touch_job(rid)
     j = _JOBS.get(rid)
     if j is None:
         return JSONResponse({"ok": False, "error": "unknown rid"}, status_code=404)
@@ -555,11 +588,10 @@ def wipe(rid: str):
             dtype=np.float64) / 255.0
         after = apply_lut(base, np.asarray(j["lut"], dtype=np.float64))
         def _durl(img):
-            buf = Path(tempfile.mkstemp(suffix=".jpg")[1])
-            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(buf, quality=85)
-            s = "data:image/jpeg;base64," + _b64.b64encode(buf.read_bytes()).decode()
-            buf.unlink(missing_ok=True)
-            return s
+            import io as _io
+            bio = _io.BytesIO()   # in-memory: mkstemp leaked one fd per frame
+            Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype("uint8")).save(bio, format="JPEG", quality=85)
+            return "data:image/jpeg;base64," + _b64.b64encode(bio.getvalue()).decode()
         return {"ok": True, "before": _durl(base), "after": _durl(after)}
     except Exception as e:
         traceback.print_exc()
@@ -632,6 +664,11 @@ class LibDelReq(BaseModel):
 
 @app.post("/library_del")
 def library_del(req: LibDelReq):
+    # ids are hex we minted in library_add — anything else (e.g. "../…") is an
+    # attempted path traversal into unlink() and gets rejected outright.
+    import re
+    if not re.fullmatch(r"[0-9a-f]{12}", req.id or ""):
+        return JSONResponse({"ok": False, "error": "bad id"}, status_code=400)
     items = [it for it in _lib_load() if it.get("id") != req.id]
     _lib_save(items)
     try:
@@ -670,8 +707,15 @@ def group_shots(req: GroupShotsReq):
             except Exception:
                 return it["id"], None
 
+        sigs = {}
         with ThreadPoolExecutor(max_workers=4) as ex:
-            sigs = dict(ex.map(sig, items))
+            futs = {ex.submit(sig, it): it["id"] for it in items}
+            for fu, iid in futs.items():
+                try:
+                    rid_, h = fu.result(timeout=30)   # offline/NAS media must not wedge the pool
+                    sigs[rid_] = h
+                except Exception:
+                    sigs[iid] = None
 
         ids = [it["id"] for it in items if sigs.get(it["id"]) is not None]
         failed = [it["id"] for it in items if sigs.get(it["id"]) is None]
@@ -685,7 +729,8 @@ def group_shots(req: GroupShotsReq):
                     g.append(cid); placed = True; break
             if not placed:
                 groups.append([cid])
-        return {"ok": True, "groups": groups, "failed": failed}
+        return {"ok": True, "groups": groups, "failed": failed,
+                "truncated": max(0, len(req.items) - len(items))}
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
@@ -715,8 +760,18 @@ def update_now():
     and restarts this engine, so it must OUTLIVE this process: on Windows
     `cmd start` detaches (and update-windows.cmd self-elevates with its own UAC
     prompt); on macOS it opens in Terminal so the user can watch."""
-    import subprocess
+    import subprocess, time
     root = Path(__file__).resolve().parents[1]
+    # Single-flight: Premiere AND After Effects auto-update on open; two updaters
+    # doing git pull + pip into the same venv concurrently corrupt each other.
+    # The second caller just gets started:true and watches the same bar.
+    global _UPDATE_STARTED_AT
+    try:
+        if time.time() - _UPDATE_STARTED_AT < 600:
+            return {"ok": True, "started": True, "already": True, "from_version": __version__}
+    except NameError:
+        pass
+    _UPDATE_STARTED_AT = time.time()
     try:
         # reset the progress file the updater will write ("pct|message")
         try:

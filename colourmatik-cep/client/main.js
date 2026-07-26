@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.4.2";
+var LOCAL_VERSION = "1.4.3";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -25,7 +25,14 @@ var _http = _req ? _req("http") : null;
 var $ = function (id) { return document.getElementById(id); };
 var state = { refPath: null, srcPath: null, srcLayerIndex: null, srcCompId: null, srcLayerName: null, rid: null, slot: null };
 /* single-quote a value for embedding inside an evalScript() source string */
-function jsArg(s) { return "'" + String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"; }
+function jsArg(s) {
+  return "'" + String(s == null ? "" : s)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/[\u0000-\u001F\u2028\u2029]/g, function (ch) {
+      return "\\u" + ("000" + ch.charCodeAt(0).toString(16)).slice(-4);
+    }) + "'";
+}
 var bakeTimer = null;
 
 /* ---- transport: Node http (primary) or fetch (fallback) ------------------- */
@@ -163,6 +170,7 @@ async function captureSrc() {
 var _runGen = 0;
 var _running = false;
 async function run() {
+  if (_updating) return setStatus("UPDATE", "Updating colourMatik — matching is paused until it finishes.", "busy");
   var gen = ++_runGen;
   _running = true;
   // Snapshot the target NOW: the engine takes seconds to minutes, and the user can
@@ -334,6 +342,7 @@ async function loadAlts(rid, tgt, gen) {
         try {
           var ej = await postJSON("/effect_lut", { rid: rid, variant: a.key }, 30000);
           if (!ej || !ej.ok) throw new Error((ej && ej.error) || "variant failed");
+          if (gen !== _runGen) return;          // a newer run owns the UI now
           state.slot = ej.slot;
           var pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
           var ap = await evalHost("cm_apply(" + parseInt(ej.slot, 10) + ", " + pct + ", " +
@@ -371,13 +380,15 @@ function onAxis() {
 }
 async function applyAxes() {
   if (!state.rid || state.slot == null || !state.lastTgt) return;
+  var gen = _runGen, rid = state.rid;        // stale completions must not re-arm
   try {
-    var body = { rid: state.rid,
+    var body = { rid: rid,
       wb: Math.round(parseFloat($("ax-wb").value) || 100) / 100,
       tone: Math.round(parseFloat($("ax-tone").value) || 100) / 100,
       color: Math.round(parseFloat($("ax-color").value) || 100) / 100 };
     var j = await postJSON("/effect_lut", body, 30000);
     if (!j || !j.ok) throw new Error((j && j.error) || "strength failed");
+    if (gen !== _runGen || rid !== state.rid) return;   // a new match owns the layer now
     state.slot = j.slot;
     var pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
     var tgt = state.lastTgt;
@@ -418,6 +429,10 @@ function _sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
  * engine; the big button's bar is the UI. No windows, no browser, no GitHub. */
 async function runSelfUpdate(fromVersion) {
   if (_updating) return;
+  if (_running) {                              // never restart the engine mid-match
+    setTimeout(function () { autoUpdateCheck(); }, 60000);
+    return;
+  }
   _updating = true;
   var el = $("update-link");
   $("run").disabled = true;
