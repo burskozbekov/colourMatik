@@ -104,6 +104,13 @@ function Phase-Autostart {
     $Lnk.WorkingDirectory = $InstallDir
     $Lnk.Save()
     # start it now, silently
+    # An old engine process holding port 8765 silently kills every newer one at
+    # bind — a machine can look "fully installed" while an ancient engine keeps
+    # serving (seen in the field: disk at 1.6.6, port answering 0.2.0).
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "colourmatik" -and $_.Name -match "python|pythonw" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep 1
     Start-Process wscript -ArgumentList "`"$InstallDir\windows\engine-hidden.vbs`"" -WindowStyle Hidden
 }
 

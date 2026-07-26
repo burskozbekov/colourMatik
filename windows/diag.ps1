@@ -120,6 +120,44 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
     Say "colourMatik install dir has no panel source - run colourMatik-Setup.exe once first."
 }
 
+# -- engine repair ------------------------------------------------------------
+# The smoking gun on the reported machine: install dir at 1.6.6 but the RUNNING
+# engine answering 0.2.0 — a leftover process from the very first install held
+# port 8765, so every newer engine died at bind and the ancient one kept
+# serving (no /update_now endpoint -> the panel could only download files; and
+# ancient matching code -> "everything is slow"). Kill anything matching, start
+# the current engine, and wait until the version it ANSWERS matches the disk.
+Say ""
+Say "=== ENGINE REPAIR ==="
+$diskVer = $null
+if (Test-Path (Join-Path $inst "version.json")) {
+    $diskVer = (Get-Content (Join-Path $inst "version.json") -Raw | ConvertFrom-Json).version
+}
+$liveVer = $null
+try { $liveVer = (Invoke-RestMethod "http://127.0.0.1:8765/version" -TimeoutSec 3).version } catch {}
+if ($diskVer -and $liveVer -ne $diskVer) {
+    Say ("running engine v" + $liveVer + " != installed v" + $diskVer + " - restarting it")
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "colourmatik" -and $_.Name -match "python|pythonw" } |
+        ForEach-Object { Say ("  killing pid " + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep 2
+    $vbs = Join-Path $inst "windows\engine-hidden.vbs"
+    if (Test-Path $vbs) { Start-Process wscript -ArgumentList ('"' + $vbs + '"') -WindowStyle Hidden; Say "  engine start requested" }
+    else { Say ("  MISSING " + $vbs + " - run colourMatik-Setup.exe once") }
+    $ok = $null
+    for ($i = 0; $i -lt 45; $i++) {
+        Start-Sleep 2
+        try {
+            $nv = (Invoke-RestMethod "http://127.0.0.1:8765/version" -TimeoutSec 2).version
+            if ($nv -eq $diskVer) { $ok = $nv; break }
+        } catch {}
+    }
+    if ($ok) { Say ("  ENGINE NOW v" + $ok + " - all good") }
+    else { Say "  engine did not come up in 90s - it can need a few minutes on first run (AI libraries); check again with: irm http://127.0.0.1:8765/version" }
+} elseif ($diskVer) {
+    Say ("engine already matches the install (v" + $diskVer + ")")
+}
+
 $rep = Join-Path ([Environment]::GetFolderPath("Desktop")) "colourmatik-diag.txt"
 $lines | Set-Content -Path $rep -Encoding UTF8
 Say ""
