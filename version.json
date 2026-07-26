@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "1.6.1",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.6.0 — now works on Intel Macs (the effect was Apple-Silicon-only and failed silently there), plus installer fixes on both platforms: admin steps no longer skipped in Terminal, Windows profile paths resolved properly, and a failed dependency install can no longer report success."
+  "notes": "colourMatik 1.6.1 — fixes Windows reinstalls that kept showing an old version: a previously installed panel and its registration survived every reinstall, so Premiere kept loading the old one."
 }

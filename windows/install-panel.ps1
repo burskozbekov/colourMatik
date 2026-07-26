@@ -52,6 +52,58 @@ if ($true) {
     Move-Item $zip $Ccx -Force
 }
 
+# --- resolve the LOGGED-IN user's UXP folder FIRST ----------------------------
+# Needed before anything else: stale copies of older versions must be removed on
+# EVERY path, and when this script runs elevated under a different admin account
+# $env:APPDATA is the admin's, not the person actually using Premiere.
+$UserProfile = $env:USERPROFILE
+try {
+    $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
+    if ($ex) {
+        $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
+        if ($owner.User) {
+            $p = Join-Path (Join-Path $env:SystemDrive "Users") $owner.User
+            if (Test-Path $p) { $UserProfile = $p }
+        }
+    }
+} catch {}
+$Ext    = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\Plugins\External"
+$Folder = $PluginId + "_" + $Version
+$Dest   = Join-Path $Ext $Folder
+
+function Remove-StaleColourMatik {
+    # THE bug behind "I reinstalled and it still says 1.2.0": an older
+    # <pluginId>_<version> folder, and its entry in Premiere's UXP registry,
+    # survived every reinstall. Adobe's agent installs the new build elsewhere,
+    # Premiere keeps loading the old registered folder, and the panel reports the
+    # old version forever. Both must go, on every install path.
+    Get-ChildItem $Ext -Directory -Filter ($PluginId + "_*") -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $Folder } |
+        ForEach-Object {
+            Write-Host ("    removing stale panel: " + $_.Name)
+            Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+        }
+    $reg = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1\premierepro.json"
+    if (Test-Path $reg) {
+        try {
+            $j = Get-Content $reg -Raw | ConvertFrom-Json
+            if ($j.plugins) {
+                $keep = @($j.plugins | Where-Object {
+                    -not ($_.pluginId -eq $PluginId -and $_.versionString -ne $Version)
+                })
+                if ($keep.Count -ne @($j.plugins).Count) {
+                    Write-Host "    removing stale panel registration(s)"
+                    $j.plugins = $keep
+                    # No BOM: Premiere refuses to parse this file with one.
+                    [IO.File]::WriteAllText($reg, ($j | ConvertTo-Json -Depth 10),
+                                            (New-Object Text.UTF8Encoding $false))
+                }
+            }
+        } catch { Write-Warning "Could not tidy the UXP registry ($_)." }
+    }
+}
+Remove-StaleColourMatik
+
 # --- install through Adobe's plugin agent (the supported path) ----------------
 $upia = $null
 foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
@@ -69,11 +121,19 @@ if ($upia) {
     if ($out) { Write-Host $out }
     if ($out -match "(?i)success") { $installed = $true }
     if ($installed) {
-        Write-Host ""
-        Write-Host "colourMatik $Version installed."
-        Write-Host "Now: fully quit and reopen Premiere Pro -> Window > UXP Plugins > colourMatik."
+        # "Success" from the agent is not proof the panel reached THIS user: when
+        # the installer is elevated with another account's credentials the agent
+        # writes into that admin's profile. Verify, tidy again, and fall through
+        # to the manual copy if the folder is not where Premiere will look.
+        Remove-StaleColourMatik
         & $upia /list all 2>&1 | Select-String -Pattern "colourMatik" | ForEach-Object { Write-Host "   $_" }
-        return
+        if (Test-Path $Dest) {
+            Write-Host ""
+            Write-Host "colourMatik $Version installed -> $Dest"
+            Write-Host "Now: fully quit and reopen Premiere Pro -> Window > UXP Plugins > colourMatik."
+            return
+        }
+        Write-Host "    (the agent reported success but the panel is not in this user's profile - installing it directly)"
     }
     Write-Host "    (the agent didn't confirm the install - falling back to developer mode)"
 } else {
@@ -81,34 +141,21 @@ if ($upia) {
 }
 
 # --- fallback: Plugins\External + Developer Mode -------------------------------
-# Resolve the LOGGED-IN user's profile even when this runs elevated: under a
-# different admin account $env:APPDATA is the admin's, not the person using
-# Premiere, and the panel would land where their Premiere never looks.
-$UserProfile = $env:USERPROFILE
-try {
-    $ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop | Select-Object -First 1
-    if ($ex) {
-        $owner = Invoke-CimMethod -InputObject $ex -MethodName GetOwner
-        if ($owner.User) {
-            $p = Join-Path (Join-Path $env:SystemDrive "Users") $owner.User
-            if (Test-Path $p) { $UserProfile = $p }
-        }
-    }
-} catch {}
-
 # The folder MUST be <pluginId>_<manifest version> - Premiere keys on it.
-$Ext    = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\Plugins\External"
-$Folder = $PluginId + "_" + $Version
-$Dest   = Join-Path $Ext $Folder
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 foreach ($f in $PanelFiles) { Copy-Item (Join-Path $Src $f) $Dest -Force }
-# drop stale <pluginId>_<older version> copies
-Get-ChildItem $Ext -Directory -Filter ($PluginId + "_*") -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ne $Folder } |
-    ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+Remove-StaleColourMatik
 
 Write-Host ""
 Write-Host "colourMatik $Version placed in $Folder."
 Write-Host "ONE manual step is needed for this path:"
 Write-Host "   Premiere Pro > Settings > Plugins > tick 'Enable developer mode'"
 Write-Host "   then fully quit and reopen Premiere -> Window > UXP Plugins > colourMatik."
+
+# Say out loud what is actually on disk, so "it still says 1.2.0" can never be a
+# mystery again.
+Write-Host ""
+Write-Host "--- installed panels for this user ---"
+Get-ChildItem $Ext -Directory -Filter ($PluginId + "_*") -ErrorAction SilentlyContinue |
+    ForEach-Object { Write-Host ("   " + $_.Name) }
+if (-not (Test-Path $Dest)) { throw "The panel was not installed into $Dest." }
