@@ -235,10 +235,13 @@
   </div>
 
   <button class="primary" id="run" disabled>
-    <span id="run-fill"></span>
-    <img id="run-cham" src="cham00.png" width="54" height="33" alt="" style="position:absolute;left:0;top:6px;width:54px;height:33px;display:none;z-index:2;" />
     <span id="run-label">MATCH &amp; APPLY</span>
   </button>
+  <div id="prog-row" style="display:flex;align-items:center;height:34px;margin-top:6px;">
+    <div id="prog-fill" style="height:8px;width:0px;background-color:#2fb56b;"></div>
+    <img id="run-cham" src="cham00.png" alt="" />
+    <div id="prog-rest" style="height:8px;background-color:#3a3f47;"></div>
+  </div>
   <button class="secondary" id="run-all" disabled title="Match every clip on the timeline to the reference — similar shots share one LUT">
     <span id="run-all-fill"></span>
     <span id="run-all-label">MATCH ALL CLIPS</span>

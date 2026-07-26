@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.4";
+var LOCAL_VERSION = "1.5.5";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -97,10 +97,13 @@ function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 var _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 /* 18 frames of the real walk-cycle artwork stacked in one sprite image. */
 var CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33, _chamFrame = 0;
-/* Inline pixel styles only — see the Premiere panel for why (host CSS subset). */
+/* Progress bar in its own flex row under the button — see the Premiere panel
+ * for why nothing here may rely on overlays, absolute positioning, percentage
+ * widths or a stylesheet. */
+var CHAM_FRAMES = 18, CHAM_W = 52, _chamFrame = 0;
 function _chamShow(on) {
-  var c = $("run-cham");
-  if (c) c.style.display = on ? "block" : "none";
+  var r = $("prog-row");
+  if (r) r.style.display = on ? "flex" : "none";
 }
 function _chamStep() {
   var c = $("run-cham");
@@ -108,34 +111,21 @@ function _chamStep() {
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
   c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
 }
-function _barGeom() {
-  var b = $("run");
-  return { w: (b && b.offsetWidth) || 0, h: (b && b.offsetHeight) || 0 };
-}
 function _paintFill(pct) {
-  var f = $("run-fill");
-  if (!f) return;
-  var g = _barGeom(), p = Math.max(0, Math.min(1, pct));
-  f.style.position = "absolute"; f.style.left = "0px"; f.style.top = "0px";
-  f.style.backgroundColor = "#2fb56b";
-  if (g.w > 0 && g.h > 0) {
-    f.style.width = Math.round(g.w * p) + "px";
-    f.style.height = g.h + "px";
+  var row = $("prog-row"), a = $("prog-fill"), b = $("prog-rest");
+  if (!row || !a || !b) return;
+  var p = Math.max(0, Math.min(1, pct));
+  var track = Math.max(0, (row.offsetWidth || 0) - CHAM_W);
+  if (track > 0) {
+    a.style.width = Math.round(track * p) + "px";
+    b.style.width = Math.round(track * (1 - p)) + "px";
   } else {
-    f.style.width = (p * 100).toFixed(1) + "%";
-    f.style.bottom = "0px";
+    a.style.flexGrow = String(Math.max(0.001, p));
+    b.style.flexGrow = String(Math.max(0.001, 1 - p));
   }
 }
-function _chamPlace(pct) {
-  var c = $("run-cham");
-  if (!c) return;
-  var g = _barGeom(), p = Math.max(0, Math.min(1, pct));
-  c.style.position = "absolute";
-  c.style.width = CHAM_W + "px"; c.style.height = CHAM_H + "px"; c.style.zIndex = "2";
-  if (g.w > CHAM_W + 8) c.style.left = Math.round((g.w - CHAM_W) * p) + "px";
-  else c.style.left = (p * 100).toFixed(1) + "%";
-  if (g.h > 0) c.style.top = Math.max(0, Math.round((g.h - CHAM_H) / 2)) + "px";
-}
+function _chamPlace(pct) { _paintFill(pct); }
+
 function _paintProg() {
   _paintFill(_dispPct);
   _chamPlace(_dispPct);

@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.4";
+const LOCAL_VERSION = "1.5.5";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -48,19 +48,18 @@ function refreshRun() {
 
 /* ---- Match & Apply loading bar (fed by the engine's /progress) ------------- */
 let _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
-/* The chameleon sprite: 18 frames of the real walk-cycle artwork stacked in one
- * image. _chamStep advances the frame; _chamPlace parks it on the fill's edge. */
-const CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33;
+/* The progress bar lives in its own flex row UNDER the button — no overlay, no
+ * absolute positioning, no percentage widths, no gradients, no clipping and no
+ * stylesheet dependency, because the panel host honoured none of those: the
+ * fill never painted and the sprite ignored its width/height entirely (it drew
+ * at the file's natural size, which is why the frames are now authored at
+ * exactly the size they must appear). Only flex + pixel widths + a background
+ * colour + an <img> remain — the parts every host renders. */
+const CHAM_FRAMES = 18, CHAM_W = 52;
 let _chamFrame = 0;
-/* Everything below writes INLINE pixel styles. The host's CSS engine is a
- * subset — id/class rules for these two elements were not applied at all (the
- * fill never painted and the sprite ignored its class size), so nothing here
- * may depend on a stylesheet, a percentage, top+bottom stretching, gradients
- * or overflow clipping. Frames are separate files swapped via src for the same
- * reason: no sprite-sheet offset, no clipping. */
 function _chamShow(on) {
-  const c = $("run-cham");
-  if (c) c.style.display = on ? "block" : "none";
+  const r = $("prog-row");
+  if (r) r.style.display = on ? "flex" : "none";
 }
 function _chamStep() {
   const c = $("run-cham");
@@ -68,39 +67,37 @@ function _chamStep() {
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
   c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
 }
-function _barGeom() {
-  const b = $("run");
-  return { w: (b && b.offsetWidth) || 0, h: (b && b.offsetHeight) || 0 };
-}
 function _paintFill(pct) {
-  const f = $("run-fill");
-  if (!f) return;
-  const g = _barGeom();
+  const row = $("prog-row"), a = $("prog-fill"), b = $("prog-rest");
+  if (!row || !a || !b) return;
   const p = Math.max(0, Math.min(1, pct));
-  f.style.position = "absolute";
-  f.style.left = "0px";
-  f.style.top = "0px";
-  f.style.backgroundColor = "#2fb56b";
-  if (g.w > 0 && g.h > 0) {
-    f.style.width = Math.round(g.w * p) + "px";
-    f.style.height = g.h + "px";
-  } else {                       // no metrics -> percentage, still explicit
-    f.style.width = (p * 100).toFixed(1) + "%";
-    f.style.bottom = "0px";
+  const w = row.offsetWidth || 0;
+  const track = Math.max(0, w - CHAM_W);
+  if (track > 0) {
+    a.style.width = Math.round(track * p) + "px";
+    b.style.width = Math.round(track * (1 - p)) + "px";
+  } else {                       // host reports no metrics -> let flex share it
+    a.style.flexGrow = String(Math.max(0.001, p));
+    b.style.flexGrow = String(Math.max(0.001, 1 - p));
   }
 }
-function _chamPlace(pct) {
-  const c = $("run-cham");
-  if (!c) return;
-  const g = _barGeom();
-  const p = Math.max(0, Math.min(1, pct));
-  c.style.position = "absolute";
-  c.style.width = CHAM_W + "px";
-  c.style.height = CHAM_H + "px";
-  c.style.zIndex = "2";
-  if (g.w > CHAM_W + 8) c.style.left = Math.round((g.w - CHAM_W) * p) + "px";
-  else c.style.left = (p * 100).toFixed(1) + "%";
-  if (g.h > 0) c.style.top = Math.max(0, Math.round((g.h - CHAM_H) / 2)) + "px";
+function _chamPlace(pct) { _paintFill(pct); }   // the row's flow does the walking
+/* One-shot report of what the host ACTUALLY laid out, so a failure is diagnosed
+ * from measurements instead of guesses. */
+let _diagSent = false;
+function _sendDiag() {
+  if (_diagSent) return;
+  _diagSent = true;
+  try {
+    const g = (id) => { const e = $(id); return e ? { w: e.offsetWidth, h: e.offsetHeight } : null; };
+    const c = $("run-cham");
+    fetchT(SERVER + "/diag", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: "premiere", version: LOCAL_VERSION,
+        row: g("prog-row"), fill: g("prog-fill"), rest: g("prog-rest"),
+        cham: g("run-cham"), chamNatural: c ? { w: c.naturalWidth, h: c.naturalHeight } : null,
+        chamSrc: c ? String(c.src).split("/").pop() : null,
+        btn: g("run") }) }, 4000).catch(() => {});
+  } catch (e) {}
 }
 function _paintProg() {
   _paintFill(_dispPct);
@@ -129,6 +126,7 @@ function startProgress(jobId) {
   // stage so the bar never looks frozen during the long AI steps.
   _chamShow(true);
   _chamTick = setInterval(_chamStep, 70);          // the walk itself
+  setTimeout(_sendDiag, 900);                      // report the real layout once
   _progTick = setInterval(() => {
     const soft = Math.min(0.97, _srvPct + 0.10);
     const target = Math.max(_srvPct, Math.min(soft, _dispPct + 0.006));

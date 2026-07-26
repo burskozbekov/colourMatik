@@ -48,11 +48,29 @@ function Phase-Code {
     if ($InstallDir -eq $Root) { Write-Host "==> Using colourMatik in: $InstallDir"; return }
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                 [Environment]::GetEnvironmentVariable("Path", "User")
-    if (Test-Path (Join-Path $InstallDir ".git")) {
-        Write-Host "==> Updating colourMatik..."; git -C $InstallDir pull --ff-only
+    # A returning user already HAS this folder, and `git clone` into an existing
+    # non-empty directory always fails ("destination path already exists"). The
+    # script then carried on and installed from the STALE folder — which is why
+    # re-running Setup could leave a machine on an old version no matter how many
+    # times it was run. Pull when it is a checkout; otherwise always refresh from
+    # the source zip, which works whether the folder exists or not.
+    $pulled = $false
+    if ((Test-Path (Join-Path $InstallDir ".git")) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "==> Updating colourMatik..."
+        git -C $InstallDir pull --ff-only
+        $pulled = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $pulled) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        & (Join-Path $Root "windows\fetch-latest.ps1") -Dest $InstallDir
+    }
+    # Verify we really are on the code we just fetched, and say so out loud.
+    $vf = Join-Path $InstallDir "version.json"
+    if (Test-Path $vf) {
+        $vv = (Get-Content $vf -Raw | ConvertFrom-Json).version
+        Write-Host "==> colourMatik source is now $vv"
     } else {
-        Write-Host "==> Downloading colourMatik to $InstallDir..."
-        git clone --depth 1 $Repo $InstallDir
+        throw "Source refresh failed - $InstallDir has no version.json."
     }
 }
 

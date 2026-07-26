@@ -741,6 +741,32 @@ def version():
     return {"name": "colourMatik", "version": __version__}
 
 
+class DiagReq(BaseModel):
+    host: str = ""
+    version: str = ""
+    row: dict | None = None
+    fill: dict | None = None
+    rest: dict | None = None
+    cham: dict | None = None
+    chamNatural: dict | None = None
+    chamSrc: str | None = None
+    btn: dict | None = None
+
+
+@app.post("/diag")
+def diag(req: DiagReq):
+    """The panel reports what the HOST actually laid out (measured sizes), so a
+    rendering problem inside Premiere/AE can be diagnosed from numbers instead
+    of screenshots. Appended to App Support/colourMatik/panel-diag.log."""
+    try:
+        _SLOT_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_SLOT_DIR / "panel-diag.log", "a") as f:
+            f.write(req.model_dump_json() + "\n")
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @app.get("/update_progress")
 def update_progress():
     """The updater writes "pct|message" here; the panel's bar polls it."""
