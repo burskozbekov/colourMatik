@@ -1,5 +1,5 @@
 {
-  "version": "1.5.2",
+  "version": "1.5.3",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.5.2 — the real chameleon walk-cycle animation now walks the progress bar as it fills green, buttons colour on hover, and MATCH ALL has its own distinct look."
+  "notes": "colourMatik 1.5.3 — the AI steps now use an NVIDIA GPU when there is one, so Windows machines are no longer stuck on the processor."
 }

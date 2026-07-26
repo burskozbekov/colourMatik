@@ -47,7 +47,9 @@ def _load():
             # original checkpoint keys are "model.*" (encoder wrapped the net)
             sd = { (k[6:] if k.startswith("model.") else k): v for k, v in sd.items() }
             model.load_state_dict(sd)
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            # Apple GPU, else an NVIDIA GPU (Windows/Linux), else the CPU.
+            device = ("mps" if torch.backends.mps.is_available()
+                      else "cuda" if torch.cuda.is_available() else "cpu")
             model.to(device).eval()
             _ENC = (model, tfm, device)
         except Exception:

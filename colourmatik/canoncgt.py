@@ -61,7 +61,9 @@ def _load_locked():
         model = CanonCGT_SSL(cfg)
         ck = torch.load(_WEIGHTS, map_location="cpu")
         model.load_state_dict(ck.get("model_state_dict", ck), strict=False)
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        # Apple GPU, else an NVIDIA GPU (Windows/Linux), else the CPU.
+        device = ("mps" if torch.backends.mps.is_available()
+                  else "cuda" if torch.cuda.is_available() else "cpu")
         model.to(device).eval()
         _MODEL = (model, device)
     except Exception:

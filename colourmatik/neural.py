@@ -67,7 +67,9 @@ def _load_seg():
         try:
             import torch
             from transformers import AutoImageProcessor, AutoModelForUniversalSegmentation
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            # Apple GPU, else an NVIDIA GPU (Windows/Linux), else the CPU.
+            device = ("mps" if torch.backends.mps.is_available()
+                      else "cuda" if torch.cuda.is_available() else "cpu")
             try:
                 proc = AutoImageProcessor.from_pretrained(_EOMT_NAME)
                 model = AutoModelForUniversalSegmentation.from_pretrained(_EOMT_NAME)
