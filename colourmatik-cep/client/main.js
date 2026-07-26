@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.3";
+var LOCAL_VERSION = "1.5.4";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -97,26 +97,47 @@ function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 var _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 /* 18 frames of the real walk-cycle artwork stacked in one sprite image. */
 var CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33, _chamFrame = 0;
+/* Inline pixel styles only — see the Premiere panel for why (host CSS subset). */
 function _chamShow(on) {
-  var w = $("run-cham");
-  if (w) w.style.display = on ? "block" : "none";
+  var c = $("run-cham");
+  if (c) c.style.display = on ? "block" : "none";
 }
 function _chamStep() {
-  var img = $("run-cham-img");
-  if (!img) return;
+  var c = $("run-cham");
+  if (!c) return;
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
-  img.style.top = (-_chamFrame * CHAM_H) + "px";
+  c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
+}
+function _barGeom() {
+  var b = $("run");
+  return { w: (b && b.offsetWidth) || 0, h: (b && b.offsetHeight) || 0 };
+}
+function _paintFill(pct) {
+  var f = $("run-fill");
+  if (!f) return;
+  var g = _barGeom(), p = Math.max(0, Math.min(1, pct));
+  f.style.position = "absolute"; f.style.left = "0px"; f.style.top = "0px";
+  f.style.backgroundColor = "#2fb56b";
+  if (g.w > 0 && g.h > 0) {
+    f.style.width = Math.round(g.w * p) + "px";
+    f.style.height = g.h + "px";
+  } else {
+    f.style.width = (p * 100).toFixed(1) + "%";
+    f.style.bottom = "0px";
+  }
 }
 function _chamPlace(pct) {
-  var w = $("run-cham"), b = $("run");
-  if (!w) return;
-  var bw = (b && b.offsetWidth) ? b.offsetWidth : 0;
-  var p = Math.max(0, Math.min(1, pct));
-  if (bw > CHAM_W + 8) w.style.left = Math.round((bw - CHAM_W) * p) + "px";
-  else w.style.left = (p * 100).toFixed(1) + "%";
+  var c = $("run-cham");
+  if (!c) return;
+  var g = _barGeom(), p = Math.max(0, Math.min(1, pct));
+  c.style.position = "absolute";
+  c.style.width = CHAM_W + "px"; c.style.height = CHAM_H + "px"; c.style.zIndex = "2";
+  if (g.w > CHAM_W + 8) c.style.left = Math.round((g.w - CHAM_W) * p) + "px";
+  else c.style.left = (p * 100).toFixed(1) + "%";
+  if (g.h > 0) c.style.top = Math.max(0, Math.round((g.h - CHAM_H) / 2)) + "px";
 }
 function _paintProg() {
-  $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
+  _paintFill(_dispPct);
   _chamPlace(_dispPct);
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
@@ -155,7 +176,7 @@ function stopProgress(done) {
   _progReset = setTimeout(function () {
     _progReset = null;
     $("run").classList.remove("loading");
-    $("run-fill").style.width = "0%";
+    _paintFill(0);
     _chamShow(false);
     $("run-label").textContent = "MATCH & APPLY";
   }, done ? 450 : 0);
@@ -478,14 +499,14 @@ async function runSelfUpdate(fromVersion) {
         var pj = await getJSON("/update_progress", 2500);
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}
-      $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      _paintFill(pct);
       _chamPlace(pct);
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
       try {
         var vj = await getJSON("/version", 2500);
         if (vj && vj.version && vj.version !== fromVersion) {
-          $("run-fill").style.width = "100%";
+          _paintFill(1);
           _chamPlace(1);
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
@@ -504,7 +525,7 @@ async function runSelfUpdate(fromVersion) {
     clearInterval(_ub);
     setTimeout(function () {
       $("run").classList.remove("loading");
-      $("run-fill").style.width = "0%";
+      _paintFill(0);
       _chamShow(false);
       $("run-label").textContent = "MATCH & APPLY";
       refreshRun();

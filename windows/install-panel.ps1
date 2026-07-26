@@ -31,7 +31,11 @@ if (-not $Src) { throw "Couldn't find the colourMatik panel files. Re-run the co
 $mf        = Get-Content (Join-Path $Src "manifest.json") -Raw | ConvertFrom-Json
 $PluginId  = $mf.id
 $Version   = $mf.version
-$PanelFiles = @("manifest.json", "index.html", "main.js")
+# Every panel asset — the chameleon frames (cham*.png) ship alongside the three
+# core files and the progress bar is blank without them.
+$PanelFiles = @("manifest.json", "index.html", "main.js") +
+              (Get-ChildItem (Join-Path $Src "cham*.png") -ErrorAction SilentlyContinue |
+               ForEach-Object { $_.Name })
 
 # --- the .ccx: a FLAT zip of the panel (manifest.json at the archive root) -----
 $Ccx = Join-Path $Src "colourMatik.ccx"

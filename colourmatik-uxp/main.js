@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.3";
+const LOCAL_VERSION = "1.5.4";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -52,26 +52,58 @@ let _progPoll = null, _progTick = null, _progReset = null, _chamTick = null, _di
  * image. _chamStep advances the frame; _chamPlace parks it on the fill's edge. */
 const CHAM_FRAMES = 18, CHAM_W = 54, CHAM_H = 33;
 let _chamFrame = 0;
+/* Everything below writes INLINE pixel styles. The host's CSS engine is a
+ * subset — id/class rules for these two elements were not applied at all (the
+ * fill never painted and the sprite ignored its class size), so nothing here
+ * may depend on a stylesheet, a percentage, top+bottom stretching, gradients
+ * or overflow clipping. Frames are separate files swapped via src for the same
+ * reason: no sprite-sheet offset, no clipping. */
 function _chamShow(on) {
-  const w = $("run-cham");
-  if (w) w.style.display = on ? "block" : "none";
+  const c = $("run-cham");
+  if (c) c.style.display = on ? "block" : "none";
 }
 function _chamStep() {
-  const img = $("run-cham-img");
-  if (!img) return;
+  const c = $("run-cham");
+  if (!c) return;
   _chamFrame = (_chamFrame + 1) % CHAM_FRAMES;
-  img.style.top = (-_chamFrame * CHAM_H) + "px";
+  c.src = "cham" + (_chamFrame < 10 ? "0" : "") + _chamFrame + ".png";
+}
+function _barGeom() {
+  const b = $("run");
+  return { w: (b && b.offsetWidth) || 0, h: (b && b.offsetHeight) || 0 };
+}
+function _paintFill(pct) {
+  const f = $("run-fill");
+  if (!f) return;
+  const g = _barGeom();
+  const p = Math.max(0, Math.min(1, pct));
+  f.style.position = "absolute";
+  f.style.left = "0px";
+  f.style.top = "0px";
+  f.style.backgroundColor = "#2fb56b";
+  if (g.w > 0 && g.h > 0) {
+    f.style.width = Math.round(g.w * p) + "px";
+    f.style.height = g.h + "px";
+  } else {                       // no metrics -> percentage, still explicit
+    f.style.width = (p * 100).toFixed(1) + "%";
+    f.style.bottom = "0px";
+  }
 }
 function _chamPlace(pct) {
-  const w = $("run-cham"), b = $("run");
-  if (!w) return;
-  const bw = (b && b.offsetWidth) ? b.offsetWidth : 0;
-  // keep the whole animal inside the button; fall back to % if width is unknown
-  if (bw > CHAM_W + 8) w.style.left = Math.round((bw - CHAM_W) * Math.max(0, Math.min(1, pct))) + "px";
-  else w.style.left = (Math.max(0, Math.min(1, pct)) * 100).toFixed(1) + "%";
+  const c = $("run-cham");
+  if (!c) return;
+  const g = _barGeom();
+  const p = Math.max(0, Math.min(1, pct));
+  c.style.position = "absolute";
+  c.style.width = CHAM_W + "px";
+  c.style.height = CHAM_H + "px";
+  c.style.zIndex = "2";
+  if (g.w > CHAM_W + 8) c.style.left = Math.round((g.w - CHAM_W) * p) + "px";
+  else c.style.left = (p * 100).toFixed(1) + "%";
+  if (g.h > 0) c.style.top = Math.max(0, Math.round((g.h - CHAM_H) / 2)) + "px";
 }
 function _paintProg() {
-  $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
+  _paintFill(_dispPct);
   _chamPlace(_dispPct);
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
@@ -116,7 +148,7 @@ function stopProgress(done) {
   _progReset = setTimeout(() => {
     _progReset = null;
     $("run").classList.remove("loading");
-    $("run-fill").style.width = "0%";
+    _paintFill(0);
     _chamShow(false);
     $("run-label").textContent = "MATCH & APPLY";
   }, done ? 450 : 0);
@@ -754,7 +786,7 @@ async function runSelfUpdate(fromVersion) {
         const pj = await pr.json();
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}                     // engine restarting — keep the bar alive
-      $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      _paintFill(pct);
       _chamPlace(pct);
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
@@ -762,7 +794,7 @@ async function runSelfUpdate(fromVersion) {
         const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 2500);
         const vj = await vr.json();
         if (vj && vj.version && vj.version !== fromVersion) {
-          $("run-fill").style.width = "100%";
+          _paintFill(1);
           _chamPlace(1);
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
@@ -781,7 +813,7 @@ async function runSelfUpdate(fromVersion) {
     clearInterval(_ub);
     setTimeout(() => {
       $("run").classList.remove("loading");
-      $("run-fill").style.width = "0%";
+      _paintFill(0);
       _chamShow(false);
       $("run-label").textContent = "MATCH & APPLY";
       refreshRun();

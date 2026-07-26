@@ -35,8 +35,11 @@ folder = f"{plugin_id}_{version}"
 dest = ext / folder
 
 dest.mkdir(parents=True, exist_ok=True)
-for f in ("manifest.json", "index.html", "main.js"):
-    shutil.copy2(src / f, dest / f)
+# Copy every panel asset, not a hardcoded three: the walking-chameleon frames
+# (cham*.png) live beside them and the panel is blank-barred without them.
+for f in sorted(src.iterdir()):
+    if f.is_file() and f.suffix.lower() in (".json", ".html", ".js", ".png", ".svg"):
+        shutil.copy2(f, dest / f.name)
 
 # drop stale <pluginId>_<older version> folders so only one copy is ever present
 for old in ext.glob(f"{plugin_id}_*"):
