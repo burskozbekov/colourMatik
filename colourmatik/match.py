@@ -186,30 +186,49 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     else:
         # Different scenes / not aligned: match the colour DISTRIBUTIONS.
         _p(0.10, "Matching colour distributions")
+        # ModFlows runs on the GPU while the CPU fits the classical candidates —
+        # the two workloads barely contend, so this is nearly free wall-clock.
+        _flow_box = {}
+        _flow_th = None
+        if neural:
+            def _flow_job():
+                try:
+                    from . import modflows as mf_mod
+                    if mf_mod.loaded_nowait():
+                        _flow_box["lut"] = mf_mod.modflows_lut(src_enc, tgt_enc, size=size)
+                except Exception:
+                    pass
+            import threading as _thr
+            _flow_th = _thr.Thread(target=_flow_job, daemon=True)
+            _flow_th.start()
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)  # linear
         luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)  # 1D curves + 3D residual
         if quick:
             transported = None
         else:
-            transported = np.clip(tf_mod.fit_idt(Sf_lin, Tf_lin, seed=seed), 0.0, None)  # nonlinear
+            # IDT + the lattice both scale with point count, and together they
+            # were the single biggest cost of a match (profiled 9.7s of ~20s on
+            # a warm engine at 300k points). A 25^3 lattice has 15,625 nodes —
+            # 150k points saturate it; accuracy is checked by the regression
+            # battery, wall-clock is roughly halved.
+            _cap = 150_000
+            if Sf_lin.shape[0] > _cap:
+                _sel = rng.choice(Sf_lin.shape[0], _cap, replace=False)
+                _idt_src_lin, _idt_src_enc = Sf_lin[_sel], Sf_enc[_sel]
+                _idt_w = weights[_sel] if weights is not None else None
+                _idt_tgt = Tf_lin[rng.choice(Tf_lin.shape[0], _cap, replace=False)]
+            else:
+                _idt_src_lin, _idt_src_enc, _idt_w, _idt_tgt = Sf_lin, Sf_enc, weights, Tf_lin
+            transported = np.clip(tf_mod.fit_idt(_idt_src_lin, _idt_tgt, seed=seed), 0.0, None)
         if transported is not None:
-            lat = tf_mod.fit_lut_lattice(Sf_enc, cs.encode(transported, tf),
-                                         L=lattice_L, weights=weights)
+            lat = tf_mod.fit_lut_lattice(_idt_src_enc, cs.encode(transported, tf),
+                                         L=lattice_L, weights=_idt_w)
             luts["idt"] = resample_lut(lat, size)
-        # ModFlows (AAAI 2025, MIT weights): encoder-predicted rectified flows,
-        # a pure RGB->RGB map evaluated EXACTLY on the lattice. Optional (needs
-        # torch + a one-time ~170MB weight download); absent -> one fewer candidate.
-        if neural:
-            try:
-                from . import modflows as mf_mod
-                if not mf_mod.loaded_nowait():
-                    raise ImportError("modflows still warming up — skip this round")
-                _p(0.30, "Neural flow match")
-                mflut = mf_mod.modflows_lut(src_enc, tgt_enc, size=size)
-                if mflut is not None:
-                    luts["flow"] = mflut
-            except Exception:
-                pass
+        # ModFlows (AAAI 2025, MIT weights) — collect the parallel result.
+        if _flow_th is not None:
+            _flow_th.join(timeout=60)
+            if _flow_box.get("lut") is not None:
+                luts["flow"] = _flow_box["lut"]
         # Unbalanced Sinkhorn transport (optional — needs torch+geomloss from the
         # AI extras). Fixes IDT's exact-mass failure: a reference dominated by one
         # colour (a huge sky) no longer forces that colour onto unrelated content.

@@ -78,6 +78,18 @@ def fit_mkl(src_lin: np.ndarray, tgt_lin: np.ndarray):
     mu_t = tgt_lin.mean(0)
     Ss = np.cov(src_lin.T)
     St = np.cov(tgt_lin.T)
+    # Shrink both covariances toward isotropic before inverting. On rank-deficient
+    # input (a grey ramp, a flat wall — src variance lives on a line) Ss^-1/2 is
+    # numerically unbounded along the missing directions and T comes out as junk
+    # there; since MKL is also every guard's FALLBACK, the junk poisoned the whole
+    # chain (measured: identity input mapped a cube corner 0.77 away). Shrinkage
+    # makes the transfer act as ~identity along directions the data never showed,
+    # which is exactly the conservative behaviour a fallback needs. At 1% of the
+    # average variance the effect on well-conditioned real footage is negligible.
+    lam_s = 0.01 * max(np.trace(Ss) / 3.0, 1e-12)
+    lam_t = 0.01 * max(np.trace(St) / 3.0, 1e-12)
+    Ss = Ss + lam_s * np.eye(3)
+    St = St + lam_t * np.eye(3)
     Ss_half = _sqrtm_sym(Ss)
     Ss_ihalf = _sqrtm_sym(Ss, inverse=True)
     mid = _sqrtm_sym(Ss_half @ St @ Ss_half)

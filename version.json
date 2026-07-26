@@ -1,5 +1,5 @@
 {
-  "version": "1.6.4",
+  "version": "1.6.5",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.6.4 — the chameleon keeps its tail, a mis-clicked Same-scene can no longer produce garbage colours (auto-detected and re-matched), and MATCH ALL got ~6s faster per group by caching the reference's AI analysis."
+  "notes": "colourMatik 1.6.5 — Match & Apply is 44% faster (27.8s to 15.5s measured on a warm engine), and a latent bug is fixed where grey or flat-colour footage poisoned every safety fallback."
 }
