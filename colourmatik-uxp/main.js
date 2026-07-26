@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.6";
+const LOCAL_VERSION = "1.5.7";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -819,6 +819,21 @@ async function runSelfUpdate(fromVersion) {
     }, 1500);
   }
 }
+/* The engine reporting a HIGHER version than this panel means the update
+ * already landed on disk and only the host is still running the old panel from
+ * memory — Adobe loads panels at app start. That state used to render as
+ * "Up to date", which reads as "the update did nothing". Name it instead. */
+async function _engineVersion() {
+  try {
+    const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
+    const vj = await vr.json(); if (vj && vj.version) return vj.version;
+  } catch (e) {}
+  return null;
+}
+async function _restartPending() {
+  const eng = await _engineVersion();
+  return (eng && semverGt(eng, LOCAL_VERSION)) ? eng : null;
+}
 async function _installedVersion() {
   // The OLDER of engine and panel: comparing only the engine hid a panel that
   // failed to reinstall — it stayed stale forever because the engine already
@@ -837,6 +852,12 @@ async function checkForUpdates() {
   if (updateReady) { runSelfUpdate(await _installedVersion()); return; }
   el.textContent = "Checking…";
   try {
+    const pend = await _restartPending();
+    if (pend) {
+      el.textContent = "Restart Premiere Pro";
+      setStatus("RESTART", "colourMatik " + pend + " is installed. Quit Premiere Pro and open it again to load the new panel.", "done");
+      return;
+    }
     const local = await _installedVersion();
     const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -886,6 +907,12 @@ $("version").textContent = "v" + LOCAL_VERSION;
  * at startup only, so it can never interrupt a match in progress. */
 async function autoUpdateCheck() {
   try {
+    const pend = await _restartPending();
+    if (pend) {                       // already updated; just needs the restart
+      $("update-link").textContent = "Restart Premiere Pro";
+      setStatus("RESTART", "colourMatik " + pend + " is installed. Quit Premiere Pro and open it again to load the new panel.", "done");
+      return;
+    }
     const local = await _installedVersion();
     const r = await fetchT(UPDATE_URL, { cache: "no-cache" }, 10000);
     if (!r.ok) return;

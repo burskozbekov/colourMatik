@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.6";
+var LOCAL_VERSION = "1.5.7";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -523,6 +523,14 @@ async function runSelfUpdate(fromVersion) {
     }, 1500);
   }
 }
+/* engine ahead of this panel == updated on disk, host still running the old
+ * copy from memory. See the Premiere panel. */
+function _restartPending() {
+  return getJSON("/version", 3000).then(function (v) {
+    var eng = (v && v.version) ? v.version : null;
+    return (eng && semverGt(eng, LOCAL_VERSION)) ? eng : null;
+  }).catch(function () { return null; });
+}
 function _installedVersion() {
   // older of engine vs panel — see the Premiere panel for why
   return getJSON("/version", 3000).then(function (v) {
@@ -540,10 +548,17 @@ function checkForUpdates() {
     if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
     return getJSONAbs(UPDATE_URL);
   };
-  _installedVersion().then(function (local) {
-    return doFetch().then(function (j) {
-      if (j && j.version && semverGt(j.version, local)) { el.textContent = "Update v" + j.version + " — install"; updateReady = true; }
-      else el.textContent = "Up to date";
+  _restartPending().then(function (pend) {
+    if (pend) {
+      el.textContent = "Restart After Effects";
+      setStatus("RESTART", "colourMatik " + pend + " is installed. Quit After Effects and open it again to load the new panel.", "done");
+      return null;
+    }
+    return _installedVersion().then(function (local) {
+      return doFetch().then(function (j) {
+        if (j && j.version && semverGt(j.version, local)) { el.textContent = "Update v" + j.version + " — install"; updateReady = true; }
+        else el.textContent = "Up to date";
+      });
     });
   }).catch(function () { el.textContent = "Check failed"; });
 }
@@ -587,7 +602,13 @@ try {
  * without any clicks. Runs once, at startup only, so it can never interrupt a
  * match in progress. */
 function autoUpdateCheck() {
-  _installedVersion().then(function (local) {
+  _restartPending().then(function (pend) {
+    if (pend) {
+      $("update-link").textContent = "Restart After Effects";
+      setStatus("RESTART", "colourMatik " + pend + " is installed. Quit After Effects and open it again to load the new panel.", "done");
+      return null;
+    }
+    return _installedVersion().then(function (local) {
     var doFetch = function () {
       if (typeof fetch === "function") return fetch(UPDATE_URL, { cache: "no-store" }).then(function (r) { return r.json(); });
       return getJSONAbs(UPDATE_URL);
@@ -595,6 +616,7 @@ function autoUpdateCheck() {
     return doFetch().then(function (j) {
       if (!(j && j.version && semverGt(j.version, local))) return;
       runSelfUpdate(local);   // fully automatic, fully in-panel
+      });
     });
   }).catch(function () {});
 }
