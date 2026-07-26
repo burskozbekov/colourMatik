@@ -70,8 +70,20 @@ def loaded_nowait() -> bool:
     return False
 
 
+_ENC_CACHE: dict = {}      # content hash -> flow weights (bounded)
+
+
 def _encode_flow_weights(enc_img: np.ndarray):
-    """enc_img: (H,W,3) float [0,1] -> flat (8195,) flow weights tensor."""
+    """enc_img: (H,W,3) float [0,1] -> flat (8195,) flow weights tensor.
+
+    Cached by content: MATCH ALL runs the SAME reference through the encoder once
+    per group, and a single EfficientNet-B6 pass is seconds."""
+    import hashlib
+    small = (np.clip(enc_img[::7, ::7], 0, 1) * 255).astype(np.uint8)
+    key = hashlib.blake2b(small.tobytes(), digest_size=16).hexdigest()
+    hit = _ENC_CACHE.get(key)
+    if hit is not None:
+        return hit
     import torch
     from PIL import Image
     model, tfm, device = _load()
@@ -82,6 +94,9 @@ def _encode_flow_weights(enc_img: np.ndarray):
     with torch.no_grad():
         x = tfm(x).unsqueeze(0).to(device)
         e = model(x).flatten().to("cpu")
+    _ENC_CACHE[key] = e
+    while len(_ENC_CACHE) > 24:
+        _ENC_CACHE.pop(next(iter(_ENC_CACHE)), None)
     return e
 
 

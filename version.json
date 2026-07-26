@@ -1,5 +1,5 @@
 {
-  "version": "1.4.3",
+  "version": "1.5.0",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.4.3 — all-angles hardening: two security fixes, memory/fd leak fixes, update-vs-match isolation, MATCH ALL parameter freezing, stale-response guards, multi-line layer name support."
+  "notes": "colourMatik 1.5 — 2.3x faster matches (60s to 26s), the progress bar no longer sits still, and a fixed judging bias: the AI candidate was grading its own homework and winning with an objectively weaker match. Results now measure 2.7x closer to the reference."
 }

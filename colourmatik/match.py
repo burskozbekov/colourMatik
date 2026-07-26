@@ -234,24 +234,66 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     # the industry-familiar number.
     _p(0.62, "Scoring candidates")
     scores = {}
+    # Score on a bounded subsample: with 6 candidates the full pixel set costs
+    # seconds for a MEAN that 120k pixels already pin to 3 decimals.
+    _SCORE_N = 60_000
     if corresponded:
         metric = "Oklab dE (x100)"
-        tgt_ok = cs.encoded_to_oklab(T_enc, tf) * 100.0
+        sidx = (rng.choice(S_enc.shape[0], _SCORE_N, replace=False)
+                if S_enc.shape[0] > _SCORE_N else np.arange(S_enc.shape[0]))
+        S_sc, T_sc = S_enc[sidx], T_enc[sidx]
+        tgt_ok = cs.encoded_to_oklab(T_sc, tf) * 100.0
         for name, lut in luts.items():
-            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, S_enc), tf) * 100.0
+            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, S_sc), tf) * 100.0
             scores[name] = float(np.mean(np.linalg.norm(out_ok - tgt_ok, axis=-1)))
     elif nctx is not None:
-        # AI available: judge each candidate by how well it matches the reference
-        # REGION BY REGION (sky↔sky, skin↔skin) — the cross-scene accuracy that a
-        # single global distribution distance misses.
-        metric = "semantic Wasserstein (AI region-matched)"
+        # AI available: judge REGION BY REGION (sky<->sky, skin<->skin) — the
+        # cross-scene accuracy a single global distance misses — AND by the
+        # neutral global distribution distance.
+        #
+        # Both are needed because the semantic metric is derived from the very
+        # segmentation the "neural" candidate is fitted on: it grades its own
+        # homework. Measured on a two-region test scene, the semantic judge
+        # crowned "neural" (0.133) while a neutral Oklab sliced-Wasserstein put
+        # it LAST (0.209 vs idt's 0.076) — i.e. the engine was shipping the
+        # objectively weaker match. Combining as a geometric mean of each
+        # metric RELATIVE TO ITS OWN BEST keeps the region insight but denies
+        # either judge the power to carry a candidate alone.
+        metric = "region + distribution (combined)"
+        sem, neu = {}, {}
+        # bounded scoring sample (12 metric passes across 6 candidates otherwise
+        # dominates the match); idx must be sliced identically so the semantic
+        # judge still looks up the right per-pixel class labels
+        ssel = (rng.choice(Sf_enc.shape[0], _SCORE_N, replace=False)
+                if Sf_enc.shape[0] > _SCORE_N else np.arange(Sf_enc.shape[0]))
+        Sf_sc, idx_sc = Sf_enc[ssel], idx[ssel]
+        tsel = (rng.choice(Tf_enc.shape[0], _SCORE_N, replace=False)
+                if Tf_enc.shape[0] > _SCORE_N else np.arange(Tf_enc.shape[0]))
+        tgt_ok_s = cs.encoded_to_oklab(Tf_enc[tsel], tf) * 100.0
         for name, lut in luts.items():
-            scores[name] = nctx.semantic_distance(apply_lut_points(lut, Sf_enc), idx)
+            out_enc = apply_lut_points(lut, Sf_sc)
+            sem[name] = float(nctx.semantic_distance(out_enc, idx_sc))
+            neu[name] = float(sliced_wasserstein(
+                cs.encoded_to_oklab(out_enc, tf) * 100.0, tgt_ok_s, seed=seed))
+        smin = max(min(sem.values()), 1e-9)
+        nmin = max(min(neu.values()), 1e-9)
+        for name in luts:
+            scores[name] = float(np.sqrt((sem[name] / smin) * (neu[name] / nmin)))
+
+        def _combined(out_enc):          # refine must be judged the SAME way
+            s = float(nctx.semantic_distance(out_enc, idx_sc)) / smin
+            n = float(sliced_wasserstein(
+                cs.encoded_to_oklab(out_enc, tf) * 100.0, tgt_ok_s, seed=seed)) / nmin
+            return float(np.sqrt(s * n))
     else:
         metric = "sliced-Wasserstein (Oklab)"
-        tgt_ok = cs.encoded_to_oklab(Tf_enc, tf) * 100.0
+        ssel = (rng.choice(Sf_enc.shape[0], _SCORE_N, replace=False)
+                if Sf_enc.shape[0] > _SCORE_N else np.arange(Sf_enc.shape[0]))
+        tsel = (rng.choice(Tf_enc.shape[0], _SCORE_N, replace=False)
+                if Tf_enc.shape[0] > _SCORE_N else np.arange(Tf_enc.shape[0]))
+        tgt_ok = cs.encoded_to_oklab(Tf_enc[tsel], tf) * 100.0
         for name, lut in luts.items():
-            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, Sf_enc), tf) * 100.0
+            out_ok = cs.encoded_to_oklab(apply_lut_points(lut, Sf_enc[ssel]), tf) * 100.0
             scores[name] = sliced_wasserstein(out_ok, tgt_ok, seed=seed)
 
     # Steepness penalty: a candidate that "wins" the distance metric with 10x+
@@ -274,10 +316,17 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     if not corresponded and refine and nctx is not None:
         try:
             from . import neural as nn_mod
-            _p(0.80, "Fine-tuning the match")
+            _p(0.66, "Fine-tuning the match")
             applied_enc = apply_lut(src_enc, res.lut)
+            # Reuse both segmentations: the reference is the SAME image, and a LUT
+            # recolours the source without moving object boundaries. This was the
+            # match's single most expensive step (measured 30.8s of a 60s match,
+            # the "stuck at 67%" stall) and it was recomputing known answers.
             ctx2 = nn_mod.prepare(applied_enc, tgt_enc, tf, size=size,
-                                  lattice_L=lattice_L, seed=seed)
+                                  lattice_L=lattice_L, seed=seed,
+                                  src_labels=getattr(nctx, "src_map", None),
+                                  ref_labels=getattr(nctx, "ref_map", None))
+            _p(0.76, "Fine-tuning the match")
             if ctx2 is not None:
                 ax = np.linspace(0.0, 1.0, size)
                 Rg, Gg, Bg = np.meshgrid(ax, ax, ax, indexing="ij")
@@ -285,7 +334,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
                 comp = apply_lut_points(ctx2.lut, apply_lut_points(res.lut, grid))
                 comp = comp.reshape(size, size, size, 3)
                 s_base = scores[best]
-                s_comp = nctx.semantic_distance(apply_lut_points(comp, Sf_enc), idx)
+                s_comp = _combined(apply_lut_points(comp, Sf_sc))
+                _p(0.86, "Fine-tuning the match")
                 if s_comp < s_base:
                     res.lut = comp
                     res.method = best + "+refine"

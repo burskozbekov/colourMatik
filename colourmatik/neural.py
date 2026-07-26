@@ -98,22 +98,30 @@ def _segment(enc: np.ndarray) -> np.ndarray | None:
     from PIL import Image
     model, proc, device = seg
     img = Image.fromarray(_to_u8(enc))
-    # EoMT-large on a bare CPU is heavy; halving the working resolution keeps the
-    # whole AI pass inside the seconds budget with no visible cost to REGION
-    # pooling (we only average colours inside each mask).
-    if device == "cpu" and min(img.size) > 384:
-        s = 384 / min(img.size)
+    # Always segment at a MODEST resolution. We only use the masks to pool colours
+    # per region, so 640px on the long side is plenty — and the models themselves
+    # work at 512. Feeding multi-megapixel stacks (7 pooled frames!) cost seconds
+    # per call in preprocessing and in the post-process upscale, for no gain.
+    long_side = 640 if device != "cpu" else 448
+    full_hw = (enc.shape[0], enc.shape[1])
+    if max(img.size) > long_side:
+        s = long_side / max(img.size)
         img = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))))
+    small_hw = (img.height, img.width)
 
     def _run(dev):
         inputs = proc(images=img, return_tensors="pt").to(dev)
         with torch.no_grad():
             outputs = model(**inputs)
-        # Works for both EoMT and SegFormer processors, and resizes back to the
-        # ORIGINAL frame size in one step.
+        # Works for both EoMT and SegFormer processors.
         seg_map = proc.post_process_semantic_segmentation(
-            outputs, target_sizes=[(enc.shape[0], enc.shape[1])])[0]
-        return seg_map.detach().to("cpu").numpy().astype(np.int32)
+            outputs, target_sizes=[small_hw])[0]
+        lab = seg_map.detach().to("cpu").numpy().astype(np.int32)
+        if lab.shape != full_hw:      # nearest-neighbour back to the frame grid
+            lab = np.asarray(Image.fromarray(lab.astype(np.int32), mode="I")
+                             .resize((full_hw[1], full_hw[0]), Image.NEAREST),
+                             dtype=np.int32)
+        return lab
 
     with _SEG_LOCK:                                   # serialize inference on the shared model
         try:
@@ -133,9 +141,12 @@ def _segment(enc: np.ndarray) -> np.ndarray | None:
 class NeuralResult:
     """The AI candidate LUT + a region-aware scorer for the engine's comparison."""
 
-    def __init__(self, lut, src_labels_flat, ref_by_class_lab, tf, min_px):
+    def __init__(self, lut, src_labels_flat, ref_by_class_lab, tf, min_px,
+                 src_map=None, ref_map=None):
         self.lut = lut                              # (size,size,size,3) smooth LUT
         self.src_labels = src_labels_flat           # (H*W,) class id per source pixel
+        self.src_map = src_map                      # (H,W) label maps, reusable by
+        self.ref_map = ref_map                      # the refine pass (see prepare)
         self.ref_lab = ref_by_class_lab             # {class: (n,3) ref Lab pixels}
         self.tf = tf
         self.min_px = min_px
@@ -164,12 +175,22 @@ class NeuralResult:
 
 def prepare(src_enc: np.ndarray, tgt_enc: np.ndarray, tf: str, *,
             size: int = 65, lattice_L: int = 25, min_px: int = 1500,
-            per_class_cap: int = 20000, seed: int = 0) -> "NeuralResult | None":
+            per_class_cap: int = 20000, seed: int = 0,
+            src_labels=None, ref_labels=None) -> "NeuralResult | None":
     """Segment both frames, build class-balanced source/reference samples, and bake
     a smooth global LUT from an IDT transport of those samples. Returns a
-    NeuralResult, or None if the AI model isn't available."""
-    src_labels = _segment(src_enc)
-    ref_labels = _segment(tgt_enc)
+    NeuralResult, or None if the AI model isn't available.
+
+    `src_labels`/`ref_labels` let a caller pass segmentations it already has. The
+    refine pass re-runs prepare() on (matched source, SAME reference): the
+    reference segmentation is bit-identical to the one just computed, and a LUT
+    only recolours the source — it never moves object boundaries — so reusing
+    both maps is exact for the reference and faithful for the source, and it
+    halves the AI cost of a match."""
+    if src_labels is None:
+        src_labels = _segment(src_enc)
+    if ref_labels is None:
+        ref_labels = _segment(tgt_enc)
     if src_labels is None or ref_labels is None:
         return None
 
@@ -216,4 +237,5 @@ def prepare(src_enc: np.ndarray, tgt_enc: np.ndarray, tf: str, *,
     lat = tf_mod.fit_lut_lattice(cs.encode(S_bal, tf), cs.encode(transported, tf),
                                  L=lattice_L)
     lut = resample_lut(lat, size)
-    return NeuralResult(lut, src_lbl, ref_lab, tf, min_px)
+    return NeuralResult(lut, src_lbl, ref_lab, tf, min_px,
+                        src_map=src_labels, ref_map=ref_labels)
