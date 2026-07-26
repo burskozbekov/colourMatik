@@ -38,8 +38,12 @@ $PanelFiles = @("manifest.json", "index.html", "main.js") +
                ForEach-Object { $_.Name })
 
 # --- the .ccx: a FLAT zip of the panel (manifest.json at the archive root) -----
-$Ccx = Join-Path $Src "colourMatik.ccx"
-if (-not (Test-Path $Ccx)) {
+# ALWAYS rebuild from the loose files. Trusting a committed colourMatik.ccx
+# meant that forgetting to re-zip it after a panel change shipped Windows an
+# OLD panel while macOS (which copies loose files) got the new one — installs
+# that looked like they had silently reverted.
+$Ccx = $null
+if ($true) {
     $zip = Join-Path $env:TEMP "colourMatik-panel.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path ($PanelFiles | ForEach-Object { Join-Path $Src $_ }) -DestinationPath $zip -Force

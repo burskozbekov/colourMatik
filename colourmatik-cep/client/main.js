@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.5";
+var LOCAL_VERSION = "1.5.6";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -487,6 +487,7 @@ async function runSelfUpdate(fromVersion) {
       await _sleep(900);
       try {
         var pj = await getJSON("/update_progress", 2500);
+        if (pj && pj.failed) throw new Error(pj.msg || "the updater reported a failure");
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}
       _paintFill(pct);
@@ -523,8 +524,11 @@ async function runSelfUpdate(fromVersion) {
   }
 }
 function _installedVersion() {
+  // older of engine vs panel — see the Premiere panel for why
   return getJSON("/version", 3000).then(function (v) {
-    return (v && v.version) ? v.version : LOCAL_VERSION;
+    var eng = (v && v.version) ? v.version : null;
+    if (!eng) return LOCAL_VERSION;
+    return semverGt(eng, LOCAL_VERSION) ? LOCAL_VERSION : eng;
   }).catch(function () { return LOCAL_VERSION; });
 }
 function checkForUpdates() {

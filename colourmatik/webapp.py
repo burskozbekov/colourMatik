@@ -771,8 +771,14 @@ def diag(req: DiagReq):
 def update_progress():
     """The updater writes "pct|message" here; the panel's bar polls it."""
     try:
-        raw = (_SLOT_DIR / "update_progress").read_text().strip()
+        # Tolerate an older on-disk updater that wrote the value with its quotes
+        # still attached (cmd's `set /p=` does not strip them) — otherwise a new
+        # engine's bar sits frozen while a perfectly good update runs.
+        raw = (_SLOT_DIR / "update_progress").read_text().strip().strip('"')
         pct_s, _, msg = raw.partition("|")
+        pct_s = pct_s.strip().strip('"')
+        if pct_s.upper() == "FAIL":          # updater reported a real failure
+            return {"ok": True, "pct": 0.0, "msg": msg or "update failed", "failed": True}
         return {"ok": True, "pct": max(0.0, min(1.0, float(pct_s) / 100.0)), "msg": msg}
     except Exception:
         return {"ok": True, "pct": 0.0, "msg": ""}
@@ -793,7 +799,10 @@ def update_now():
     # The second caller just gets started:true and watches the same bar.
     global _UPDATE_STARTED_AT
     try:
-        if time.time() - _UPDATE_STARTED_AT < 600:
+        # Must outlive the update itself: a first run downloads multi-GB AI
+        # wheels and routinely passes 20 minutes. A 10-minute window let a
+        # second panel start a CONCURRENT pip into the same venv.
+        if time.time() - _UPDATE_STARTED_AT < 2400:
             return {"ok": True, "started": True, "already": True, "from_version": __version__}
     except NameError:
         pass
@@ -811,8 +820,12 @@ def update_now():
             if not upd.exists():
                 return JSONResponse({"ok": False, "error": "updater not found"}, status_code=404)
             # /silent: hidden elevated window, no pause — the PANEL is the UI.
-            subprocess.Popen(["cmd", "/c", str(upd), "/silent"], cwd=str(root),
-                             creationflags=(0x00000008 | 0x00000200 | 0x08000000))
+            # Log on Windows too — every failure there used to vanish with the
+            # hidden window, leaving nothing to diagnose.
+            with open(log, "ab") as lf:
+                subprocess.Popen(["cmd", "/c", str(upd), "/silent"], cwd=str(root),
+                                 stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
+                                 creationflags=(0x00000008 | 0x00000200 | 0x08000000))
             #                DETACHED | NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         else:
             upd = root / "update.command"

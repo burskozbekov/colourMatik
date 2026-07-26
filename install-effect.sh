@@ -3,7 +3,13 @@
 # built-in Intensity slider) into Premiere Pro / After Effects. After running,
 # RESTART the host app; it appears under Video Effects ▸ colourMatik ▸ colourMatik.
 # macOS / Apple Silicon. Uses admin (sudo) only if the plug-ins folder isn't writable.
-set -e
+# NOT `set -e`: a panel-driven update has no terminal, so sudo cannot prompt.
+# Aborting on the first non-writable plug-ins folder used to skip everything
+# after it — including the per-user After Effects panel, which needs no admin
+# at all. Every step is now independent and the admin ones are gated.
+set -uo pipefail
+CAN_SUDO=0
+sudo -n true 2>/dev/null && CAN_SUDO=1
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$DIR/colourmatik-fx/colourMatik.plugin"
 # After Effects gets a variant with a DIFFERENT effect match name, so AE — which
@@ -19,7 +25,9 @@ DESTDIR="$(dirname "$DEST")"
 SUDO=""
 if ! mkdir -p "$DESTDIR" 2>/dev/null || [ ! -w "$DESTDIR" ]; then
     echo "The Adobe plug-ins folder needs admin rights — you'll be asked for your Mac password."
-    SUDO="sudo"
+    if [ "$CAN_SUDO" = "1" ]; then SUDO="sudo"; else
+      echo "  (skipping: needs admin and no password prompt is possible here)"; SUDO=""; SKIP_ADMIN=1
+    fi
     $SUDO mkdir -p "$DESTDIR"
 fi
 $SUDO rm -rf "$DEST"
@@ -42,7 +50,9 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     AEDEST="$AEPLUG/colourMatik/colourMatik.plugin"
     if [ ! -w "$AEPLUG" ] && [ -z "$SUDO" ]; then
         echo "After Effects plug-ins folder needs admin — you may be asked for your password."
-        SUDO="sudo"
+        if [ "$CAN_SUDO" = "1" ]; then SUDO="sudo"; else
+      echo "  (skipping: needs admin and no password prompt is possible here)"; SUDO=""; SKIP_ADMIN=1
+    fi
     fi
     $SUDO mkdir -p "$AEPLUG/colourMatik"
     $SUDO rm -rf "$AEDEST"

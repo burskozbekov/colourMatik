@@ -1,5 +1,5 @@
 {
-  "version": "1.5.5",
+  "version": "1.5.6",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.5.5 — Windows Setup could re-install an OLD version over itself (fixed), and the green bar + walking chameleon are rebuilt with layout every host renders."
+  "notes": "colourMatik 1.5.6 — a 19-finding audit of the update chain: Windows could install an old panel, its progress bar was frozen, the updater overwrote itself mid-run, failures reported success, and NVIDIA GPUs went unused. All fixed on both platforms."
 }

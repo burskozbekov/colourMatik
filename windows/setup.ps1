@@ -42,6 +42,15 @@ if ($NoAI) { Write-Host "==> Skipping local AI (-NoAI). Classical engine ready."
 
 Write-Host "==> Installing local-AI deps (PyTorch / transformers). A few hundred MB."
 & $pip install --quiet -r requirements-ai.txt
+# PyPI ships a CPU-only torch on Windows, so the NVIDIA path added in 1.5.3 was
+# unreachable for every downloader. Swap in the CUDA build when there is a card.
+$nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match 'NVIDIA' }
+if ($nv) {
+    Write-Host "==> NVIDIA GPU detected - installing the CUDA build of PyTorch"
+    & $pip install --quiet --upgrade --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+    if ($LASTEXITCODE -ne 0) { Write-Warning "CUDA PyTorch install failed; keeping the CPU build." }
+}
 
 Write-Host "==> Fetching CanonCGT (CVPR 2026, Apache-2.0) into vendor\"
 New-Item -ItemType Directory -Force -Path vendor | Out-Null

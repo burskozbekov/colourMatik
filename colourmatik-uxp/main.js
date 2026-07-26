@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.5";
+const LOCAL_VERSION = "1.5.6";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -782,6 +782,7 @@ async function runSelfUpdate(fromVersion) {
       try {
         const pr = await fetchT(SERVER + "/update_progress", { cache: "no-cache" }, 2500);
         const pj = await pr.json();
+        if (pj && pj.failed) throw new Error(pj.msg || "the updater reported a failure");
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}                     // engine restarting — keep the bar alive
       _paintFill(pct);
@@ -819,11 +820,16 @@ async function runSelfUpdate(fromVersion) {
   }
 }
 async function _installedVersion() {
+  // The OLDER of engine and panel: comparing only the engine hid a panel that
+  // failed to reinstall — it stayed stale forever because the engine already
+  // reported the new version and no update was ever offered.
+  let eng = null;
   try {
     const vr = await fetchT(SERVER + "/version", { cache: "no-cache" }, 3000);
-    const vj = await vr.json(); if (vj && vj.version) return vj.version;
+    const vj = await vr.json(); if (vj && vj.version) eng = vj.version;
   } catch (e) {}
-  return LOCAL_VERSION;
+  if (!eng) return LOCAL_VERSION;
+  return semverGt(eng, LOCAL_VERSION) ? LOCAL_VERSION : eng;
 }
 async function checkForUpdates() {
   const el = $("update-link");
