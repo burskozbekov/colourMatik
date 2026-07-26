@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.5.1",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest",
-  "notes": "colourMatik 1.5 — 2.3x faster matches (60s to 26s), the progress bar no longer sits still, and a fixed judging bias: the AI candidate was grading its own homework and winning with an objectively weaker match. Results now measure 2.7x closer to the reference."
+  "notes": "colourMatik 1.5.1 — the progress bars fill brand-green and the colourMatik chameleon walks the leading edge (Match & Apply, MATCH ALL, and updates)."
 }

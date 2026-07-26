@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.5.0";
+var LOCAL_VERSION = "1.5.1";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -97,6 +97,11 @@ function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 var _progPoll = null, _progTick = null, _progReset = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 function _paintProg() {
   $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
+  var _c = $("run-cham");
+  if (_c) {                              // chameleon walks the fill edge + bobs
+    _c.style.left = (_dispPct * 100).toFixed(1) + "%";
+    _c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
+  }
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
 function startProgress(jobId) {
@@ -437,6 +442,10 @@ async function runSelfUpdate(fromVersion) {
   var el = $("update-link");
   $("run").disabled = true;
   $("run").classList.add("loading");
+  var _ub = setInterval(function () {    // keep the chameleon bobbing between polls
+    var c = $("run-cham");
+    if (c) c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
+  }, 130);
   try {
     var j = await postJSON("/update_now", {}, 8000);
     if (!j || !j.ok) throw new Error((j && j.error) || "the engine couldn't start the update");
@@ -450,12 +459,14 @@ async function runSelfUpdate(fromVersion) {
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}
       $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      var _cc = $("run-cham"); if (_cc) _cc.style.left = (pct * 100).toFixed(0) + "%";
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
       try {
         var vj = await getJSON("/version", 2500);
         if (vj && vj.version && vj.version !== fromVersion) {
           $("run-fill").style.width = "100%";
+          var _cd = $("run-cham"); if (_cd) _cd.style.left = "100%";
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
           setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart After Effects to load the new panel.", "done");
@@ -470,6 +481,7 @@ async function runSelfUpdate(fromVersion) {
     updateReady = true;
   } finally {
     _updating = false;
+    clearInterval(_ub);
     setTimeout(function () {
       $("run").classList.remove("loading");
       $("run-fill").style.width = "0%";

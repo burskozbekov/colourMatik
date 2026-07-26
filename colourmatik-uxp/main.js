@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.5.0";
+const LOCAL_VERSION = "1.5.1";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -50,6 +50,11 @@ function refreshRun() {
 let _progPoll = null, _progTick = null, _progReset = null, _dispPct = 0, _srvPct = 0, _srvMsg = "";
 function _paintProg() {
   $("run-fill").style.width = (_dispPct * 100).toFixed(1) + "%";
+  const _c = $("run-cham");
+  if (_c) {                              // chameleon walks the fill edge + bobs
+    _c.style.left = (_dispPct * 100).toFixed(1) + "%";
+    _c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
+  }
   $("run-label").textContent = Math.round(_dispPct * 100) + "%" + (_srvMsg ? "  ·  " + _srvMsg : "");
 }
 function startProgress(jobId) {
@@ -507,6 +512,23 @@ async function getAllVideoClips() {
   }
   return clips;
 }
+/* MATCH ALL button: same colour-fill + walking chameleon as the main button */
+function _allBar(pct, text) {
+  const b = $("run-all"), f = $("run-all-fill"), l = $("run-all-label"), c = $("run-all-cham");
+  if (!f || !l) { if (b) b.textContent = text; return; }
+  if (pct == null) {
+    b.classList.remove("loading");
+    f.style.width = "0%";
+    if (c) c.style.left = "0%";
+    l.textContent = text;
+    return;
+  }
+  b.classList.add("loading");
+  const pp = (Math.max(0, Math.min(1, pct)) * 100).toFixed(1);
+  f.style.width = pp + "%";
+  if (c) c.style.left = pp + "%";
+  l.textContent = text;
+}
 async function matchAll() {
   if (_matchingAll) return;
   if (!state.refPath) return setStatus("SELECT", "Pick a REFERENCE first.", "error");
@@ -523,11 +545,17 @@ async function matchAll() {
   $("intensity-section").className = "section hidden";
   state.slot = null; state.rid = null;
   const btn = $("run-all");
+  const bobT = setInterval(() => {
+    const c = $("run-all-cham");
+    if (c && btn.classList.contains("loading"))
+      c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
+  }, 130);
   try {
     setStatus("SCAN", "Reading the timeline…", "busy");
+    _allBar(0.03, "READING TIMELINE…");
     const clips = await getAllVideoClips();
     if (!clips.length) throw new Error("No video clips found on the active sequence (this needs Premiere's 2026 UXP timeline API).");
-    btn.textContent = "GROUPING " + clips.length + " CLIPS…";
+    _allBar(0.08, "GROUPING " + clips.length + " CLIPS…");
     const gr = await fetchT(SERVER + "/group_shots", { method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ items: clips.map(c => ({ id: c.id, path: c.path, "in": c.inS, "out": c.outS })) }) }, 120000);
@@ -538,7 +566,7 @@ async function matchAll() {
     let done = 0, applied = 0;
     for (const g of groups) {
       done++;
-      btn.textContent = "MATCHING GROUP " + done + "/" + groups.length + "…";
+      _allBar(0.10 + 0.88 * (done - 1) / groups.length, "MATCHING GROUP " + done + "/" + groups.length + "…");
       setStatus("MATCH ALL", "Group " + done + "/" + groups.length + " (" + g.length + " clip" + (g.length > 1 ? "s" : "") + ")…", "busy");
       // longest member represents the group
       const members = g.map(id => clips[id]).filter(Boolean);
@@ -568,6 +596,7 @@ async function matchAll() {
         }
       } catch (e) {}
     }
+    _allBar(1, "DONE");
     setStatus("DONE", "Matched " + applied + "/" + clips.length + " clips in " + groups.length + " groups" +
       (skipped ? " (" + skipped + " clip" + (skipped > 1 ? "s" : "") + " skipped — offline media or over the 60-clip limit)" : "") +
       " — same-look shots share one LUT (no pops at cuts).", "done");
@@ -575,7 +604,8 @@ async function matchAll() {
     setStatus("ERROR", String(e.message || e), "error");
   } finally {
     _matchingAll = false;
-    btn.textContent = "MATCH ALL CLIPS";
+    clearInterval(bobT);
+    setTimeout(() => { _allBar(null, "MATCH ALL CLIPS"); refreshRunAll(); }, 1400);
     refreshRunAll();
   }
 }
@@ -698,6 +728,10 @@ async function runSelfUpdate(fromVersion) {
   const el = $("update-link");
   $("run").disabled = true;
   $("run").classList.add("loading");
+  const _ub = setInterval(() => {        // keep the chameleon bobbing between polls
+    const c = $("run-cham");
+    if (c) c.style.marginTop = (-13 + Math.round(2 * Math.sin(Date.now() / 110))) + "px";
+  }, 130);
   try {
     const r = await fetchT(SERVER + "/update_now", { method: "POST" }, 8000);
     const j = await r.json().catch(() => ({ ok: false }));
@@ -713,6 +747,7 @@ async function runSelfUpdate(fromVersion) {
         if (pj && typeof pj.pct === "number") { pct = Math.max(pct, pj.pct); if (pj.msg) msg = pj.msg; }
       } catch (e) {}                     // engine restarting — keep the bar alive
       $("run-fill").style.width = (pct * 100).toFixed(0) + "%";
+      { const c = $("run-cham"); if (c) c.style.left = (pct * 100).toFixed(0) + "%"; }
       $("run-label").textContent = "UPDATING " + Math.round(pct * 100) + "%  ·  " + msg;
       el.textContent = "Updating " + Math.round(pct * 100) + "%";
       try {
@@ -720,6 +755,7 @@ async function runSelfUpdate(fromVersion) {
         const vj = await vr.json();
         if (vj && vj.version && vj.version !== fromVersion) {
           $("run-fill").style.width = "100%";
+          { const c = $("run-cham"); if (c) c.style.left = "100%"; }
           $("run-label").textContent = "UPDATED";
           el.textContent = "Updated to v" + vj.version;
           setStatus("UPDATED", "colourMatik is now v" + vj.version + ". Restart Premiere Pro to load the new panel.", "done");
@@ -734,6 +770,7 @@ async function runSelfUpdate(fromVersion) {
     updateReady = true;
   } finally {
     _updating = false;
+    clearInterval(_ub);
     setTimeout(() => {
       $("run").classList.remove("loading");
       $("run-fill").style.width = "0%";
