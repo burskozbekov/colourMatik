@@ -7,7 +7,12 @@
 # way that looks like "nothing happened".
 param([Parameter(Mandatory = $true)][string]$Dest)
 $ErrorActionPreference = 'Stop'
-$tmp = Join-Path $env:TEMP ('cmk-upd-' + [guid]::NewGuid().ToString('N'))
+# A machine with TEMP unset (or redirected to nothing) would otherwise fail on
+# a null path before downloading anything.
+$tmpRoot = $env:TEMP
+if (-not $tmpRoot) { $tmpRoot = $env:TMP }
+if (-not $tmpRoot) { $tmpRoot = [IO.Path]::GetTempPath() }
+$tmp = Join-Path $tmpRoot ('cmk-upd-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
     Write-Host "==> Downloading the latest colourMatik..."
