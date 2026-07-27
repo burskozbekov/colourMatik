@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.6.6";
+var LOCAL_VERSION = "1.6.7";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -168,6 +168,7 @@ async function captureRef() {
     var s = await evalHost("cm_getSelectedSourcePath()");
     if (!s.ok) return setStatus("SELECT", s.message || "Select the reference layer, then click again.", "error");
     state.refPath = s.path;
+    state.refAt = (typeof s.curT === "number" && s.curT >= 0) ? s.curT : null;
     $("refName").textContent = baseName(s.path);
     $("refName").className = "slot-name set";
     refreshRun();
@@ -180,6 +181,7 @@ async function captureSrc() {
     var s = await evalHost("cm_getSelectedSourcePath()");
     if (!s.ok) return setStatus("SELECT", s.message || "Select the target layer, then click again.", "error");
     state.srcPath = s.path;
+    state.srcAt = (typeof s.curT === "number" && s.curT >= 0) ? s.curT : null;
     state.srcLayerIndex = s.layerIndex;
     state.srcCompId = s.compId || null;
     state.srcLayerName = s.layerName || null;
@@ -203,6 +205,8 @@ async function run() {
   // re-capture meanwhile — this match must land on the layer it was started for.
   var tgt = {
     srcPath: state.srcPath, refPath: state.refPath,
+    srcAt: (typeof state.srcAt === "number") ? state.srcAt : null,
+    refAt: (typeof state.refAt === "number") ? state.refAt : null,
     idx: state.srcLayerIndex, compId: state.srcCompId, name: state.srcLayerName
   };
   $("run").disabled = true;
@@ -221,6 +225,7 @@ async function run() {
   try {
     var dj = await postJSON("/match_paths", {
       source_path: tgt.srcPath, reference_path: tgt.refPath,
+      source_at: tgt.srcAt, reference_at: tgt.refAt,
       mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 3, look: currentLook(), fast: true
     }, 45000);
     if (dj && dj.ok && gen === _runGen) {
@@ -239,6 +244,7 @@ async function run() {
     try {
       j = await postJSON("/match_paths", {
         source_path: tgt.srcPath, reference_path: tgt.refPath,
+        source_at: tgt.srcAt, reference_at: tgt.refAt,
         mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 7, look: currentLook(), job_id: jobId
       }, 300000);
     } catch (netErr) { throw new Error(String(netErr.message || netErr)); }

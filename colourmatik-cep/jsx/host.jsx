@@ -214,9 +214,24 @@ function cm_getSelectedSourcePath() {
         var L = cm_selLayer(comp);  if (!L)   return cm_res(false, "Select a layer in the timeline.");
         var path = cm_layerImagePath(L);
         if (!path) return cm_res(false, "Couldn't read '" + L.name + "'. " + _cmDiag);
+        // The SOURCE-media time under the playhead: "take the colour from the
+        // frame I am showing you", not an average of the whole clip. Time-remap
+        // aware; stretch-aware; clamped into the source.
+        var curT = -1;
+        try {
+            var t = comp.time;
+            if (L.timeRemapEnabled && L.timeRemap) {
+                curT = L.timeRemap.valueAtTime(t, false);
+            } else {
+                var st = (L.stretch && L.stretch !== 0) ? (100.0 / L.stretch) : 1.0;
+                curT = (t - L.startTime) * st;
+            }
+            var dur = (L.source && L.source.duration) ? L.source.duration : 0;
+            if (dur > 0) { if (curT < 0) curT = 0; if (curT > dur - 0.05) curT = Math.max(0, dur - 0.05); }
+        } catch (e) { curT = -1; }
         // compId pins the apply to THIS comp — cm_apply must not guess from whatever
         // viewer happens to be active minutes later when the match finishes.
-        return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index + ',"compId":' + comp.id);
+        return cm_res(true, "OK", '"path":"' + cm_esc(path) + '","layerName":"' + cm_esc(L.name) + '","layerIndex":' + L.index + ',"compId":' + comp.id + ',"curT":' + curT);
     } catch (e) { return cm_res(false, "Error: " + e.toString()); }
 }
 

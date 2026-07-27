@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.6.6";
+const LOCAL_VERSION = "1.6.7";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -171,7 +171,7 @@ async function getSelected() {
           // The segment actually used in the edit (source-media seconds). Long
           // source files hold many scenes — sampling only this range is what
           // makes the match reflect the shot you're grading.
-          let inS = null, outS = null;
+          let inS = null, outS = null, atS = null;
           try {
             const ti = await c.getInPoint();
             const to = await c.getOutPoint();
@@ -179,7 +179,22 @@ async function getSelected() {
             if (to && typeof to.seconds === "number" && isFinite(to.seconds)) outS = to.seconds;
             if (inS != null && outS != null && outS - inS < 0.04) { inS = null; outS = null; }
           } catch (e) {}
-          return { path: p, trackItem: c, inS, outS };
+          // "Take the colour from the frame I am showing": if the playhead sits
+          // on this clip, capture the exact SOURCE time under it.
+          try {
+            const pos = await seq.getPlayerPosition();
+            const posS = pos && typeof pos.seconds === "number" ? pos.seconds
+                        : (typeof pos === "number" ? pos / 254016000000 : null);
+            const ts = await c.getStartTime();
+            const te = await c.getEndTime();
+            const startS = ts && typeof ts.seconds === "number" ? ts.seconds : null;
+            const endS = te && typeof te.seconds === "number" ? te.seconds : null;
+            if (posS != null && startS != null && endS != null &&
+                posS >= startS && posS < endS && inS != null) {
+              atS = inS + (posS - startS);
+            }
+          } catch (e) {}
+          return { path: p, trackItem: c, inS, outS, atS };
         }
       }
     }
@@ -202,6 +217,7 @@ async function captureRef() {
     if (!s.path) return setStatus("SELECT", "Select the reference clip (bin or timeline), then click again.", "error");
     state.refPath = s.path;
     state.refIn = s.inS; state.refOut = s.outS;
+    state.refAt = (typeof s.atS === "number") ? s.atS : null;
     $("refName").textContent = baseName(s.path);
     $("refName").className = "slot-name set";
     refreshRun();
@@ -217,6 +233,7 @@ async function captureSrc() {
     state.srcPath = s.path;
     state.srcTrackItem = s.trackItem;   // needed to apply the effect
     state.srcIn = s.inS; state.srcOut = s.outS;
+    state.srcAt = (typeof s.atS === "number") ? s.atS : null;
     state.slot = null;                  // a new target invalidates the prior match's slot
     $("intensity-section").className = "section hidden";   // intensity inert until a fresh match
     $("srcName").textContent = baseName(s.path) + (s.trackItem ? "" : "  (not on timeline)");
@@ -291,6 +308,8 @@ async function run() {
   const tgt = {
     srcPath: state.srcPath, refPath: state.refPath, trackItem: state.srcTrackItem,
     srcIn: state.srcIn, srcOut: state.srcOut, refIn: state.refIn, refOut: state.refOut,
+    srcAt: (typeof state.srcAt === "number") ? state.srcAt : null,
+    refAt: (typeof state.refAt === "number") ? state.refAt : null,
   };
   $("run").disabled = true;
   $("preview").className = "hidden";
@@ -315,6 +334,7 @@ async function run() {
         mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 3, look: currentLook(),
         source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
         reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
+        source_at: tgt.srcAt, reference_at: tgt.refAt,
         fast: true,
       }),
     }, 45000);
@@ -344,6 +364,7 @@ async function run() {
           mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 7, look: currentLook(),
           source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
           reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
+          source_at: tgt.srcAt, reference_at: tgt.refAt,
           job_id: jobId,
         }),
       }, 300000);

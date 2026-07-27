@@ -240,6 +240,7 @@ def index() -> str:
 def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
              job: Path, title: str, look: str = "exact",
              src_range: tuple | None = None, ref_range: tuple | None = None,
+             src_at: float | None = None, ref_at: float | None = None,
              job_id: str | None = None, fast: bool = False) -> dict:
     corresponded = (mode == "same")
     # Frame pooling (stacked frames) helps the classical distribution methods, but the
@@ -258,10 +259,17 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
         # robust sampling (extra candidates + dominant-look selection) only in
         # distribution mode — corresponded mode needs identical frame indices on
         # both clips, and dropping different outliers per clip would break pairs.
-        fs = ex.submit(cmio.load_any, src_path, frames=f, start=si, end=so,
-                       robust=not corresponded)
-        fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro,
-                       robust=not corresponded)
+        # An exact frame time wins over everything: one frame, at that instant.
+        if src_at is not None:
+            fs = ex.submit(cmio.load_any, src_path, t=float(src_at), frames=1)
+        else:
+            fs = ex.submit(cmio.load_any, src_path, frames=f, start=si, end=so,
+                           robust=not corresponded)
+        if ref_at is not None:
+            fr = ex.submit(cmio.load_any, ref_path, t=float(ref_at), frames=1)
+        else:
+            fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro,
+                           robust=not corresponded)
         src, ref = fs.result(), fr.result()
 
     _set_progress(job_id, 0.16, "Analysing colour")
@@ -363,6 +371,12 @@ class PathReq(BaseModel):
     source_out: float | None = None
     reference_in: float | None = None
     reference_out: float | None = None
+    # EXACT frame times (seconds, source-media-relative). When the panel sends
+    # these, matching reads ONE frame at that instant instead of pooling across
+    # the clip — "take the colour from the frame I am showing you". Trumps the
+    # in/out range.
+    source_at: float | None = None
+    reference_at: float | None = None
     job_id: str | None = None   # client tag so the panel can poll GET /progress/{job_id}
 
 
@@ -381,6 +395,7 @@ def match_paths(req: PathReq):
                                      f"colourMatik {src.stem}", look=req.look,
                                      src_range=(req.source_in, req.source_out),
                                      ref_range=(req.reference_in, req.reference_out),
+                                     src_at=req.source_at, ref_at=req.reference_at,
                                      job_id=req.job_id, fast=req.fast))
     except Exception as e:
         traceback.print_exc()

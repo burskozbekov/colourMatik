@@ -1,5 +1,5 @@
 {
-  "version": "1.6.6",
+  "version": "1.6.7",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.6.6 — Windows finally stops resurrecting 1.2.0 (the old panel lived on in Adobe's own PluginsStorage and agent database, untouched by every earlier cleanup); the Mac installer now verifies the engine actually answers before claiming success; and the panel says 'engine is starting' instead of opening into a red error during the ~30s boot."
+  "notes": "colourMatik 1.6.7 — matching now samples the EXACT frame under your playhead (After Effects and Premiere) instead of averaging the whole clip: park on the moment whose colour you mean, and that is what gets matched."
 }
