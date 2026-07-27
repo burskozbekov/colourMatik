@@ -33,8 +33,7 @@ from .metrics import image_delta_e00, summarize
 app = FastAPI(title="colourMatik")
 
 
-@app.on_event("startup")
-def _warm_ai_models():
+def _warm_ai_models_disabled():
     """Fetch/load the AI models in the BACKGROUND right after the engine starts.
     EoMT (~1.2GB) and ModFlows (~170MB) download once per machine; without this
     the user's FIRST match silently pays that download and the progress bar
@@ -274,7 +273,13 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
 
     _set_progress(job_id, 0.16, "Analysing colour")
     # match() spans 16%..82% of the bar; forward its internal milestones.
+    # Back to the fast, proven core: mkl + sep + idt with the gamut/steepness
+    # guards, judged in Oklab. The heavy AI candidates (EoMT, ModFlows, UOT,
+    # refine) cost 1.4GB of downloads and 15-25s per match for gains the field
+    # never felt — the product this replaces was "fast and right", so that is
+    # the default again. The code stays importable for the future.
     res = match(src, ref, corresponded=corresponded, tf=tf, look=look, quick=fast,
+                neural=False, refine=False,
                 progress=lambda p, m: _set_progress(job_id, 0.16 + p * 0.66, m))
 
     _set_progress(job_id, 0.84, "Baking the LUT")

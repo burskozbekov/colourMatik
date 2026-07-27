@@ -45,8 +45,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
           tf: str = "sRGB", size: int = 65, degrees=(1, 2, 3),
           lattice_L: int = 25, sample: int = 300_000, seed: int = 0,
           skin_protect: bool = True, skin_weight: float = 8.0,
-          neural: bool = True, look: str = "exact",
-          refine: bool = True, quick: bool = False, progress=None) -> MatchResult:
+          neural: bool = False, look: str = "exact",
+          refine: bool = False, quick: bool = False, progress=None) -> MatchResult:
     """Match `src_enc` (video 2) to `tgt_enc` (video 1). Returns winning LUT + report.
 
     Every candidate is turned into its actual `size^3` LUT, that LUT is applied to

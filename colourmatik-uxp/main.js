@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.6.7";
+const LOCAL_VERSION = "1.7.0";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -37,9 +37,7 @@ function currentMode() {
   return $("mode-same").classList.contains("selected") ? "same" : "different";
 }
 
-function currentLook() {
-  return $("look-ai").classList.contains("selected") ? "ai_grade" : "exact";
-}
+function currentLook() { return "exact"; }   // Cinematic AI removed - accurate matching only
 
 function refreshRun() {
   $("run").disabled = !(state.refPath && state.srcPath) || _updating || _matchingAll;
@@ -889,12 +887,6 @@ $("mode-different").addEventListener("click", () => {
 });
 $("mode-same").addEventListener("click", () => {
   $("mode-same").classList.add("selected"); $("mode-different").classList.remove("selected");
-});
-$("look-exact").addEventListener("click", () => {
-  $("look-exact").classList.add("selected"); $("look-ai").classList.remove("selected");
-});
-$("look-ai").addEventListener("click", () => {
-  $("look-ai").classList.add("selected"); $("look-exact").classList.remove("selected");
 });
 $("run").addEventListener("click", run);
 $("intensity").addEventListener("input", onIntensity);

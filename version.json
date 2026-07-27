@@ -1,5 +1,5 @@
 {
-  "version": "1.6.7",
+  "version": "1.7.0",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.6.7 — matching now samples the EXACT frame under your playhead (After Effects and Premiere) instead of averaging the whole clip: park on the moment whose colour you mean, and that is what gets matched."
+  "notes": "colourMatik 1.7 — back to fast and right: matches in ~8s (draft in 1s), installs in a fraction of the time (no gigabyte AI downloads), and matching samples the exact frame under your playhead. Same features: pickable looks, WB/Tone/Colour, gallery, wipe, MATCH ALL, camera log formats, walking chameleon."
 }

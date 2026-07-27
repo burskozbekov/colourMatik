@@ -38,31 +38,18 @@ prog 37 42 "Installing the engine…"
 echo "==> Installing base engine deps"
 ./.venv/bin/pip install --quiet -r requirements.txt
 
-if [ "$1" = "--no-ai" ]; then
-    echo "==> Skipping local AI (--no-ai). Classical engine ready."
-    exit 0
+# The heavy local-AI stack (PyTorch, transformers, CanonCGT weights - GBs of
+# downloads and minutes of install) is OPT-IN now. The default engine is the
+# fast classical core; nothing below downloads anything.
+if [ "${1:-}" = "--ai" ]; then
+    prog 42 72 "Downloading the AI engine (a few GB)..."
+    ./.venv/bin/pip install --quiet -r requirements-ai.txt
+    mkdir -p vendor
+    if [ ! -d vendor/CanonCGT ]; then
+        curl -fsSL "https://github.com/Jinwon-Ko/CanonCGT/archive/refs/heads/main.zip" -o vendor/_canoncgt.zip
+        ( cd vendor && unzip -o -q _canoncgt.zip && rm -f _canoncgt.zip && mv CanonCGT-main CanonCGT )
+    fi
 fi
 
-prog 42 72 "Downloading the AI engine (a few GB — the long part)…"
-echo "==> Installing local-AI deps (PyTorch / transformers). This is a few hundred MB."
-./.venv/bin/pip install --quiet -r requirements-ai.txt
-
-prog 72 76 "Fetching the AI grading model…"
-echo "==> Fetching CanonCGT (CVPR 2026, Apache-2.0) into vendor/ (zip, no git needed)"
-mkdir -p vendor
-if [ ! -d vendor/CanonCGT ]; then
-    curl -fsSL "https://github.com/Jinwon-Ko/CanonCGT/archive/refs/heads/main.zip" -o vendor/_canoncgt.zip
-    ( cd vendor && unzip -o -q _canoncgt.zip && rm -f _canoncgt.zip && mv CanonCGT-main CanonCGT )
-fi
-
-prog 76 84 "Downloading the AI model weights…"
-echo "==> Downloading CanonCGT pretrained weights"
-mkdir -p vendor/CanonCGT/pretrained
-W="vendor/CanonCGT/pretrained/SSL_updated_251111.pth"
-if [ ! -s "$W" ] || [ "$(wc -c < "$W" 2>/dev/null || echo 0)" -lt 1000000 ]; then
-    ./.venv/bin/gdown "1SqzCXjdJ95TAhDYY9Z4TaQPuoqlEyfkT" -O vendor/CanonCGT/pretrained/_dl.zip
-    # the Drive file is a zip bundling the .pth checkpoints
-    ( cd vendor/CanonCGT/pretrained && unzip -o -q _dl.zip && rm -f _dl.zip )
-fi
 echo "==> Done. Start the engine with:  ./colourmatik-app"
 echo "    (First AI run also auto-downloads the SegFormer scene model, ~15MB, from Hugging Face.)"

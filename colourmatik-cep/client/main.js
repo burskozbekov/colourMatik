@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.6.7";
+var LOCAL_VERSION = "1.7.0";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -89,7 +89,7 @@ function setStatus(stateLabel, msg, kind) {
   $("status").className = kind || "idle";
 }
 function currentMode() { return $("mode-same").classList.contains("selected") ? "same" : "different"; }
-function currentLook() { return $("look-ai").classList.contains("selected") ? "ai_grade" : "exact"; }
+function currentLook() { return "exact"; }   // Cinematic AI removed - accurate matching only
 function refreshRun() { $("run").disabled = !(state.refPath && state.srcPath); }
 function baseName(p) { return p ? p.split(/[\\\/]/).pop() : ""; }
 
@@ -570,8 +570,6 @@ $("refBtn").addEventListener("click", captureRef);
 $("srcBtn").addEventListener("click", captureSrc);
 $("mode-different").addEventListener("click", function () { $("mode-different").classList.add("selected"); $("mode-same").classList.remove("selected"); });
 $("mode-same").addEventListener("click", function () { $("mode-same").classList.add("selected"); $("mode-different").classList.remove("selected"); });
-$("look-exact").addEventListener("click", function () { $("look-exact").classList.add("selected"); $("look-ai").classList.remove("selected"); });
-$("look-ai").addEventListener("click", function () { $("look-ai").classList.add("selected"); $("look-exact").classList.remove("selected"); });
 $("run").addEventListener("click", run);
 $("intensity").addEventListener("input", onIntensity);
 ["wb", "tone", "color"].forEach(function (k) { $("ax-" + k).addEventListener("input", onAxis); });

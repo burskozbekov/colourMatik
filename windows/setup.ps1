@@ -42,31 +42,15 @@ if ($LASTEXITCODE -ne 0) { throw "Installing the engine's dependencies failed - 
 if ($NoAI) { Write-Host "==> Skipping local AI (-NoAI). Classical engine ready."; exit 0 }
 
 Write-Host "==> Installing local-AI deps (PyTorch / transformers). A few hundred MB."
-& $pip install -r requirements-ai.txt
-if ($LASTEXITCODE -ne 0) { throw "Installing the AI dependencies failed - see the messages above." }
-# PyPI ships a CPU-only torch on Windows, so the NVIDIA path added in 1.5.3 was
-# unreachable for every downloader. Swap in the CUDA build when there is a card.
-$nv = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -match 'NVIDIA' }
-if ($nv) {
-    Write-Host "==> NVIDIA GPU detected - installing the CUDA build of PyTorch"
-    & $pip install --quiet --upgrade --index-url https://download.pytorch.org/whl/cu124 torch torchvision
-    if ($LASTEXITCODE -ne 0) { Write-Warning "CUDA PyTorch install failed; keeping the CPU build." }
-}
+# AI extras are OPT-IN now (kept for the future):
+#   .venv\Scripts\pip install -r requirements-ai.txt
+# (CUDA torch install moved behind the AI opt-in as well.)
 
-Write-Host "==> Fetching CanonCGT (CVPR 2026, Apache-2.0) into vendor\"
-New-Item -ItemType Directory -Force -Path vendor | Out-Null
-if (-not (Test-Path "vendor\CanonCGT")) {
-    git clone --depth 1 https://github.com/Jinwon-Ko/CanonCGT.git vendor\CanonCGT
-}
+# The heavy local-AI stack is OPT-IN now (kept for the future):
+#   .venv\Scripts\pip install -r requirements-ai.txt
+#   git clone https://github.com/Jinwon-Ko/CanonCGT vendor\CanonCGT  (+ weights)
+# The default engine is the fast classical core; nothing here downloads models.
 
-Write-Host "==> Downloading CanonCGT pretrained weights"
-$w = "vendor\CanonCGT\pretrained\SSL_updated_251111.pth"
-if (-not (Test-Path $w) -or ((Get-Item $w).Length -lt 1000000)) {
-    & ".\.venv\Scripts\gdown.exe" "1SqzCXjdJ95TAhDYY9Z4TaQPuoqlEyfkT" -O "vendor\CanonCGT\pretrained\_dl.zip"
-    Expand-Archive -Force "vendor\CanonCGT\pretrained\_dl.zip" "vendor\CanonCGT\pretrained"
-    Remove-Item -Force "vendor\CanonCGT\pretrained\_dl.zip"
-}
 Write-Host "==> Done. Start the engine with:  windows\colourmatik-app.cmd"
 Write-Host "    (First AI run also auto-downloads the SegFormer scene model, ~15MB.)"
 
