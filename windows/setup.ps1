@@ -1,6 +1,6 @@
 # colourMatik — Windows engine setup. Creates the Python venv, installs deps,
-# and fetches the local-AI model (CanonCGT) + weights. Idempotent; re-run any time.
-#   powershell -ExecutionPolicy Bypass -File windows\setup.ps1 [-NoAI]
+# Fast classical engine only; the heavy local-AI stack is opt-in (see below).
+#   powershell -ExecutionPolicy Bypass -File windows\setup.ps1
 param([switch]$NoAI)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -39,9 +39,8 @@ Write-Host "==> Installing base engine deps"
 & $pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "Installing the engine's dependencies failed - see the messages above." }
 
-if ($NoAI) { Write-Host "==> Skipping local AI (-NoAI). Classical engine ready."; exit 0 }
+# -NoAI is obsolete: the default IS the classical engine now.
 
-Write-Host "==> Installing local-AI deps (PyTorch / transformers). A few hundred MB."
 # AI extras are OPT-IN now (kept for the future):
 #   .venv\Scripts\pip install -r requirements-ai.txt
 # (CUDA torch install moved behind the AI opt-in as well.)

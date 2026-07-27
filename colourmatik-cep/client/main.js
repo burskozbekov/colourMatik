@@ -13,7 +13,7 @@ try {
   cs.evalScript('$.evalFile("' + _jsxPath + '")');
 } catch (e) {}
 var SERVER_HOST = "127.0.0.1", SERVER_PORT = 8765;
-var LOCAL_VERSION = "1.7.0";
+var LOCAL_VERSION = "1.7.1";
 var UPDATE_URL = "https://raw.githubusercontent.com/burskozbekov/colourMatik/main/version.json";
 var SITE_URL = "https://catheadai.com";
 var DEFAULT_INTENSITY = 100;
@@ -234,7 +234,7 @@ async function run() {
         state.slot = de.slot;
         var apd = await evalHost("cm_apply(" + parseInt(de.slot, 10) + ", " + DEFAULT_INTENSITY + ", " +
           (tgt.idx || 0) + ", " + (tgt.compId || 0) + ", " + jsArg(tgt.name) + ")");
-        if (apd && apd.ok) setStatus("DRAFT", "Draft look applied - refining with AI in the background...", "busy");
+        if (apd && apd.ok) setStatus("DRAFT", "Draft look applied - refining in the background...", "busy");
       }
     }
   } catch (e) {}

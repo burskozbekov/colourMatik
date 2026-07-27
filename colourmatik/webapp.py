@@ -242,9 +242,20 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
              src_at: float | None = None, ref_at: float | None = None,
              job_id: str | None = None, fast: bool = False) -> dict:
     corresponded = (mode == "same")
+    # A pre-1.7 panel with "Cinematic AI" still selected sends look="ai_grade".
+    # CanonCGT is opt-in now; on machines that still HAVE the old AI stack the
+    # request would otherwise run it on a 7-frame stacked mosaic (the single-
+    # coherent-image special case is gone). Coerce at the boundary: legacy
+    # requests get the same accurate contest as everyone else.
+    if look == "ai_grade":
+        look = "exact"
     # Frame pooling (stacked frames) helps the classical distribution methods, but the
     # learned look-transfer (CanonCGT) analyses ONE coherent image — give it a single frame.
-    f = 1 if look == "ai_grade" else frames
+    # "ai_grade" from a pre-1.7 panel: CanonCGT is opt-in now, so the request
+    # degrades to the classical contest — which WANTS pooled frames. The old
+    # single-frame special case would have silently degraded those users'
+    # matches instead.
+    f = frames
     if fast:
         f = min(f, 3)            # the draft reads 3 frames; the full pass re-reads properly
     si, so = src_range or (None, None)

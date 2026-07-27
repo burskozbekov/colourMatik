@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# colourMatik — one-shot setup. Creates the Python venv, installs deps, and fetches
-# the local-AI model (CanonCGT) + weights. Re-run any time; it is idempotent.
+# colourMatik — one-shot setup. Creates the Python venv and installs the fast
+# classical engine. Re-run any time; it is idempotent.
 # Needs ONLY Python 3.11+ — no Homebrew, no git, no system ffmpeg (ffmpeg is
-# bundled via the imageio-ffmpeg pip package; CanonCGT is fetched as a zip).
+# bundled via the imageio-ffmpeg pip package).
 #
-#   ./setup.sh          # full install (classical engine + local AI)
-#   ./setup.sh --no-ai  # classical engine only (skip PyTorch / CanonCGT)
+#   ./setup.sh          # fast classical engine (the product default)
+#   ./setup.sh --ai     # optional: heavy local-AI extras (GBs; not required)
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
@@ -49,7 +49,14 @@ if [ "${1:-}" = "--ai" ]; then
         curl -fsSL "https://github.com/Jinwon-Ko/CanonCGT/archive/refs/heads/main.zip" -o vendor/_canoncgt.zip
         ( cd vendor && unzip -o -q _canoncgt.zip && rm -f _canoncgt.zip && mv CanonCGT-main CanonCGT )
     fi
+    # The weights are what make CanonCGT actually load — without this step the
+    # multi-GB opt-in silently degrades to classical forever.
+    mkdir -p vendor/CanonCGT/pretrained
+    W="vendor/CanonCGT/pretrained/SSL_updated_251111.pth"
+    if [ ! -s "$W" ] || [ "$(wc -c < "$W" 2>/dev/null || echo 0)" -lt 1000000 ]; then
+        ./.venv/bin/gdown "1SqzCXjdJ95TAhDYY9Z4TaQPuoqlEyfkT" -O vendor/CanonCGT/pretrained/_dl.zip
+        ( cd vendor/CanonCGT/pretrained && unzip -o -q _dl.zip && rm -f _dl.zip )
+    fi
 fi
 
 echo "==> Done. Start the engine with:  ./colourmatik-app"
-echo "    (First AI run also auto-downloads the SegFormer scene model, ~15MB, from Hugging Face.)"

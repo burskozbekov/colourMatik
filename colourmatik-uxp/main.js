@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.7.0";
+const LOCAL_VERSION = "1.7.1";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -345,7 +345,7 @@ async function run() {
       if (de && de.ok && gen === _runGen) {
         state.slot = de.slot;
         try { await applyEffect(tgt.trackItem, de.slot, DEFAULT_INTENSITY); } catch (e) {}
-        setStatus("DRAFT", "Draft look applied - refining with AI in the background...", "busy");
+        setStatus("DRAFT", "Draft look applied - refining in the background...", "busy");
       }
     }
   } catch (e) {}
