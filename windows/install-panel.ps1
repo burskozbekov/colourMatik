@@ -158,6 +158,7 @@ foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
 }
 
 $installed = $false
+$agentOk = $false
 if ($upia) {
     # Ask the agent to forget any previous colourMatik first — its database is
     # the source Premiere trusts, and an old registration there outlives every
@@ -248,10 +249,16 @@ try {
 } catch { Write-Warning ("Could not write the UXP registry (" + $_.Exception.Message + ").") }
 
 Write-Host ""
-Write-Host "colourMatik $Version placed in $Folder."
-Write-Host "ONE manual step is needed for this path:"
-Write-Host "   Premiere Pro > Settings > Plugins > tick 'Enable developer mode'"
-Write-Host "   then fully quit and reopen Premiere -> Window > UXP Plugins > colourMatik."
+if ($agentOk) {
+    # Adobe's agent registered it: Premiere shows the panel with no toggles.
+    Write-Host "colourMatik $Version is installed and registered."
+    Write-Host "Quit Premiere Pro completely and open it again -> Window > UXP Plugins > colourMatik."
+} else {
+    Write-Host "colourMatik $Version placed in $Folder."
+    Write-Host "If the panel does not appear after restarting Premiere, turn this on once:"
+    Write-Host "   Premiere Pro > Settings > Plugins > tick 'Enable developer mode'"
+    Write-Host "   then fully quit and reopen Premiere -> Window > UXP Plugins > colourMatik."
+}
 
 # Say out loud what is actually on disk, so "it still says 1.2.0" can never be a
 # mystery again.
