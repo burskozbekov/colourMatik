@@ -55,6 +55,23 @@ foreach ($root in (@((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "Plugi
 if (-not $found) { Say "  (none found)" }
 
 # -- every UXP registry file ------------------------------------------------
+# -- manifest sanity ---------------------------------------------------------
+# Premiere silently refuses a panel whose manifest asks for a permission it
+# does not accept - no error, no listing, just an empty UXP window. This is
+# what kept every build after 1.2.0 invisible on Windows.
+Say "--- manifest check ---"
+foreach ($mfp in (Get-ChildItem (Join-Path $uxp "Plugins\External") -Recurse -Filter "manifest.json" -ErrorAction SilentlyContinue)) {
+    try {
+        $mm = Get-Content $mfp.FullName -Raw | ConvertFrom-Json
+        if ($mm.id -notlike "com.colourmatik*") { continue }
+        $ext = @()
+        try { $ext = @($mm.requiredPermissions.launchProcess.extensions) } catch {}
+        $flag = ""
+        if ($ext -contains ".exe") { $flag = "  <-- .exe present: Premiere on Windows REFUSES this manifest" }
+        Say ("  v" + $mm.version + " launchProcess.extensions = [" + ($ext -join ", ") + "]" + $flag)
+    } catch { Say ("  unreadable manifest: " + $mfp.FullName) }
+}
+
 Say "--- UXP registries ---"
 $regDir = Join-Path $uxp "PluginsInfo\v1"
 if (Test-Path $regDir) {
