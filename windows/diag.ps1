@@ -26,9 +26,19 @@ if (Test-Path (Join-Path $inst "version.json")) {
 
 # -- every panel copy on this machine --------------------------------------
 $uxp = Join-Path $env:APPDATA "Adobe\UXP"
+# Machine-wide UXP roots: when the agent runs ELEVATED it installs here, and no
+# per-user cleanup ever touches them - the last hiding place a 1.2.0 can live.
+$machineRoots = @()
+foreach ($pfBase in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    if (-not $pfBase) { continue }
+    foreach ($sub in @("Common Files\Adobe\UXP\PluginsStorage", "Common Files\Adobe\UXP\Plugins\External", "Adobe\UXP\PluginsStorage", "Adobe\UXP\Plugins\External")) {
+        $mr = Join-Path $pfBase $sub
+        if (Test-Path $mr) { $machineRoots += $mr }
+    }
+}
 Say "--- panel copies ---"
 $found = @()
-foreach ($root in @((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "PluginsStorage"))) {
+foreach ($root in (@((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "PluginsStorage")) + $machineRoots)) {
     if (-not (Test-Path $root)) { continue }
     Get-ChildItem $root -Recurse -Directory -Filter "com.colourmatik*" -ErrorAction SilentlyContinue |
     ForEach-Object {
@@ -82,12 +92,30 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
     # 1) agent forgets us (its database outlives file deletion)
     if ($upia) { & $upia /remove com.colourmatik.panel 2>&1 | Out-Null; Say "  agent /remove done" }
 
-    # 2) delete every stale copy (Plugins\External AND PluginsStorage, all hosts/versions)
-    foreach ($root in @((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "PluginsStorage"))) {
+    # 2) delete every stale copy (per-user AND machine-wide, all hosts/versions)
+    $needElevation = @()
+    foreach ($root in (@((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "PluginsStorage")) + $machineRoots)) {
         if (-not (Test-Path $root)) { continue }
         Get-ChildItem $root -Recurse -Directory -Filter "com.colourmatik*" -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne ("com.colourmatik.panel_" + $curVer) } |
-        ForEach-Object { Say ("  removing " + $_.FullName.Replace($env:APPDATA, "%APPDATA%")); Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+        ForEach-Object {
+            Say ("  removing " + $_.FullName.Replace($env:APPDATA, "%APPDATA%"))
+            Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+            if (Test-Path $_.FullName) { $needElevation += $_.FullName }
+        }
+    }
+    if ($needElevation.Count -gt 0) {
+        Say ""
+        Say "!! Some copies are in protected folders and need ADMIN to remove:"
+        foreach ($ne in $needElevation) { Say ("     " + $ne) }
+        $cmd = ($needElevation | ForEach-Object { "Remove-Item -Recurse -Force '" + $_ + "'" }) -join "; "
+        Say "   Removing them now via an elevated window (approve the prompt)..."
+        try {
+            Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile", "-Command", $cmd
+            $left = @($needElevation | Where-Object { Test-Path $_ })
+            if ($left.Count -eq 0) { Say "   removed with admin rights - done" }
+            else { Say "   STILL PRESENT (prompt declined?) - run PowerShell as Administrator and paste:"; Say ("     " + $cmd) }
+        } catch { Say ("   elevation failed - run PowerShell as Administrator and paste:"); Say ("     " + $cmd) }
     }
 
     # 3) clean EVERY registry json (premierepro.json, the Beta's file, all of them)

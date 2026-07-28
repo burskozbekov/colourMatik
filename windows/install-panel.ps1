@@ -78,6 +78,23 @@ function Remove-StaleColourMatik {
     # long ago survived every fix aimed at Plugins\External, which is exactly
     # why a fresh website install kept reporting 1.2.0. Remove it everywhere;
     # the agent reinstall (or the developer-mode copy) puts the current one back.
+    # Machine-wide roots too: an ELEVATED agent install lands under Program
+    # Files\Common Files\Adobe\UXP, which no per-user cleanup ever touched -
+    # the last place an ancient panel could keep loading from. This script runs
+    # elevated during Setup, so it CAN remove them.
+    foreach ($pfBase in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+        if (-not $pfBase) { continue }
+        foreach ($sub in @("Common Files\Adobe\UXP", "Adobe\UXP")) {
+            $mr = Join-Path $pfBase $sub
+            if (-not (Test-Path $mr)) { continue }
+            Get-ChildItem $mr -Recurse -Directory -Filter "com.colourmatik*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne ("com.colourmatik.panel_" + $Version) } |
+            ForEach-Object {
+                Write-Host ("    removing machine-wide panel: " + $_.FullName)
+                Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+            }
+        }
+    }
     $storageRoot = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsStorage"
     if (Test-Path $storageRoot) {
         Get-ChildItem $storageRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
