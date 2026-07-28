@@ -72,6 +72,11 @@ $Folder = $PluginId + "_" + $Version
 $Dest   = Join-Path $Ext $Folder
 
 function Remove-StaleColourMatik {
+    # -IncludeAgentCopies: also delete the agent's own PluginsStorage copies.
+    # Only safe BEFORE installing. Calling it afterwards deleted the very files
+    # the agent had just written, leaving a valid registration pointing at
+    # nothing - files gone, panel missing from the UXP window.
+    param([switch]$IncludeAgentCopies)
     # Adobe's plugin agent keeps ITS OWN copy under UXP\PluginsStorage\PPRO\
     # <version>\External\<id> — with NO version in the folder name — and
     # Premiere loads THAT one when it is registered. The 1.2.0 installed there
@@ -82,7 +87,7 @@ function Remove-StaleColourMatik {
     # Files\Common Files\Adobe\UXP, which no per-user cleanup ever touched -
     # the last place an ancient panel could keep loading from. This script runs
     # elevated during Setup, so it CAN remove them.
-    foreach ($pfBase in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    foreach ($pfBase in @($(if ($IncludeAgentCopies) { $env:ProgramFiles }), $(if ($IncludeAgentCopies) { ${env:ProgramFiles(x86)} }), $(if ($IncludeAgentCopies) { $env:ProgramData }))) {
         if (-not $pfBase) { continue }
         foreach ($sub in @("Common Files\Adobe\UXP", "Adobe\UXP")) {
             $mr = Join-Path $pfBase $sub
@@ -96,7 +101,7 @@ function Remove-StaleColourMatik {
         }
     }
     $storageRoot = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsStorage"
-    if (Test-Path $storageRoot) {
+    if ($IncludeAgentCopies -and (Test-Path $storageRoot)) {
         Get-ChildItem $storageRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
                 $stale = Join-Path $_.FullName "External\com.colourmatik.panel"
@@ -142,7 +147,7 @@ function Remove-StaleColourMatik {
         }
     }
 }
-Remove-StaleColourMatik
+Remove-StaleColourMatik -IncludeAgentCopies
 
 # --- install through Adobe's plugin agent (the supported path) ----------------
 $upia = $null
@@ -170,15 +175,31 @@ if ($upia) {
         # the installer is elevated with another account's credentials the agent
         # writes into that admin's profile. Verify, tidy again, and fall through
         # to the manual copy if the folder is not where Premiere will look.
+        # NOTE: no agent-copy purge here - that would delete what was just
+        # installed. Only stale VERSIONED folders and registry rows are tidied.
         Remove-StaleColourMatik
         & $upia /list all 2>&1 | Select-String -Pattern "colourMatik" | ForEach-Object { Write-Host "   $_" }
-        if (Test-Path $Dest) {
+        # Real verification: find a panel on disk whose OWN main.js reports the
+        # version we just installed. "Agent said success" and "a folder exists"
+        # both lied on real machines.
+        $verified = $null
+        $searchRoots = @((Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsStorage"),
+                         (Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\Plugins\External"))
+        foreach ($sr in $searchRoots) {
+            if (-not (Test-Path $sr)) { continue }
+            Get-ChildItem $sr -Recurse -Filter "main.js" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "com\.colourmatik" } | ForEach-Object {
+                $mm = Select-String -Path $_.FullName -Pattern 'LOCAL_VERSION = "([^"]+)"' | Select-Object -First 1
+                if ($mm -and $mm.Matches[0].Groups[1].Value -eq $Version) { $verified = $_.Directory.FullName }
+            }
+        }
+        if ($verified) {
             Write-Host ""
-            Write-Host "colourMatik $Version installed -> $Dest"
+            Write-Host "colourMatik $Version installed and registered -> $verified"
             Write-Host "Now: fully quit and reopen Premiere Pro -> Window > UXP Plugins > colourMatik."
             return
         }
-        Write-Host "    (the agent reported success but the panel is not in this user's profile - installing it directly)"
+        Write-Host "    (the agent reported success but no v$Version panel is on disk - installing it directly)"
     }
     Write-Host "    (the agent didn't confirm the install - falling back to developer mode)"
 } else {
