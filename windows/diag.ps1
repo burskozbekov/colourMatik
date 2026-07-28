@@ -136,13 +136,49 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
     }
 
     # 4) put the current panel in place (developer-mode path)
-    $dest = Join-Path $uxp ("Plugins\External\com.colourmatik.panel_" + $curVer)
+    $PluginFolder = "com.colourmatik.panel_" + $curVer
+    $dest = Join-Path $uxp ("Plugins\External\" + $PluginFolder)
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Copy-Item (Join-Path $srcPanel "*") $dest -Force -Exclude "*.ccx"
     Say ("  installed -> " + $dest.Replace($env:APPDATA, "%APPDATA%"))
     # 5) REGISTER it through Adobe's agent so Premiere shows it WITHOUT any
     # developer-mode toggle. Removing the old registration above without doing
     # this left one field machine with files on disk and an empty UXP window.
+    # 5a) WRITE THE REGISTRY ENTRY OURSELVES - this is what macOS has always
+    # done, and it is why the Mac panel never goes missing. Windows relied
+    # entirely on Adobe's agent, so when the agent's row was gone the panel
+    # vanished from the UXP window with the files sitting right there.
+    if (-not (Test-Path $regDir)) { New-Item -ItemType Directory -Force -Path $regDir | Out-Null }
+    $mf = Get-Content (Join-Path $srcPanel "manifest.json") -Raw | ConvertFrom-Json
+    $hostMin = "26.0"
+    try { if ($mf.host -and $mf.host.minVersion) { $hostMin = $mf.host.minVersion } } catch {}
+    $entry = [ordered]@{
+        hostMinVersion = $hostMin
+        name           = $(if ($mf.name) { $mf.name } else { "colourMatik" })
+        path           = '$localPlugins/External/' + $PluginFolder
+        pluginId       = "com.colourmatik.panel"
+        status         = "enabled"
+        type           = "uxp"
+        versionString  = $curVer
+    }
+    foreach ($regName in @("premierepro.json", "PremierePro.json")) {
+        $regFile = Join-Path $regDir $regName
+        if (-not (Test-Path $regFile)) {
+            if ($regName -ne "premierepro.json") { continue }
+            [IO.File]::WriteAllText($regFile, '{"plugins":[]}', (New-Object Text.UTF8Encoding $false))
+        }
+        try {
+            $j = Get-Content $regFile -Raw | ConvertFrom-Json
+            $keep = @()
+            if ($j.plugins) { $keep = @($j.plugins | Where-Object { $_.pluginId -ne "com.colourmatik.panel" }) }
+            $keep += [pscustomobject]$entry
+            $j.plugins = $keep
+            # NO BOM - Premiere refuses to parse this file with one.
+            [IO.File]::WriteAllText($regFile, ($j | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+            Say ("  registered in " + $regName + " -> " + $entry.path)
+        } catch { Say ("  could not write " + $regName + " (" + $_.Exception.Message + ")") }
+    }
+
     if ($upia) {
         $zip = Join-Path $env:TEMP "colourMatik-diag.zip"
         $ccx = Join-Path $env:TEMP "colourMatik-diag.ccx"

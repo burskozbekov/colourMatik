@@ -194,23 +194,58 @@ if ($upia) {
             }
         }
         if ($verified) {
-            Write-Host ""
-            Write-Host "colourMatik $Version installed and registered -> $verified"
-            Write-Host "Now: fully quit and reopen Premiere Pro -> Window > UXP Plugins > colourMatik."
-            return
+            Write-Host ("    agent installed -> " + $verified)
+            # Do NOT return here: fall through so the files also land in the
+            # developer-mode folder AND our own registry entry is written. The
+            # agent's registration alone has proven fragile in the field (its
+            # database can be cleared out from under us), and belt-and-braces
+            # is what makes the macOS side never fail.
+            $agentOk = $true
+        } else {
+            Write-Host "    (the agent reported success but no v$Version panel is on disk - installing it directly)"
         }
-        Write-Host "    (the agent reported success but no v$Version panel is on disk - installing it directly)"
     }
-    Write-Host "    (the agent didn't confirm the install - falling back to developer mode)"
+    if (-not $installed) { Write-Host "    (the agent didn't confirm the install - installing directly)" }
 } else {
     Write-Host "==> Adobe's plugin agent isn't on this machine - using the developer-mode path."
 }
 
-# --- fallback: Plugins\External + Developer Mode -------------------------------
+# --- always-works path: files + our own registry entry -------------------------
 # The folder MUST be <pluginId>_<manifest version> - Premiere keys on it.
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 foreach ($f in $PanelFiles) { Copy-Item (Join-Path $Src $f) $Dest -Force }
 Remove-StaleColourMatik
+
+# Write the UXP registry entry ourselves. macOS has always done this, which is
+# why the Mac panel never disappears; Windows trusted Adobe's agent alone, so
+# whenever that registration was absent the panel vanished from the UXP window
+# while its files sat right there on disk.
+$regDir2 = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1"
+if (-not (Test-Path $regDir2)) { New-Item -ItemType Directory -Force -Path $regDir2 | Out-Null }
+$hostMin = "26.0"
+try { if ($mf.host -and $mf.host.minVersion) { $hostMin = $mf.host.minVersion } } catch {}
+$entry = [ordered]@{
+    hostMinVersion = $hostMin
+    name           = $(if ($mf.name) { $mf.name } else { "colourMatik" })
+    path           = '$localPlugins/External/' + $Folder
+    pluginId       = $PluginId
+    status         = "enabled"
+    type           = "uxp"
+    versionString  = $Version
+}
+$regFile2 = Join-Path $regDir2 "premierepro.json"
+if (-not (Test-Path $regFile2)) {
+    [IO.File]::WriteAllText($regFile2, '{"plugins":[]}', (New-Object Text.UTF8Encoding $false))
+}
+try {
+    $j2 = Get-Content $regFile2 -Raw | ConvertFrom-Json
+    $keep2 = @()
+    if ($j2.plugins) { $keep2 = @($j2.plugins | Where-Object { $_.pluginId -ne $PluginId }) }
+    $keep2 += [pscustomobject]$entry
+    $j2.plugins = $keep2
+    [IO.File]::WriteAllText($regFile2, ($j2 | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding $false))
+    Write-Host ("    registered -> " + $entry.path)
+} catch { Write-Warning ("Could not write the UXP registry (" + $_.Exception.Message + ").") }
 
 Write-Host ""
 Write-Host "colourMatik $Version placed in $Folder."
