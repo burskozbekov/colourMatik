@@ -135,11 +135,26 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
         }
     }
 
-    # 4) put the current panel in place (developer-mode path, always works)
+    # 4) put the current panel in place (developer-mode path)
     $dest = Join-Path $uxp ("Plugins\External\com.colourmatik.panel_" + $curVer)
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Copy-Item (Join-Path $srcPanel "*") $dest -Force -Exclude "*.ccx"
     Say ("  installed -> " + $dest.Replace($env:APPDATA, "%APPDATA%"))
+    # 5) REGISTER it through Adobe's agent so Premiere shows it WITHOUT any
+    # developer-mode toggle. Removing the old registration above without doing
+    # this left one field machine with files on disk and an empty UXP window.
+    if ($upia) {
+        $zip = Join-Path $env:TEMP "colourMatik-diag.zip"
+        $ccx = Join-Path $env:TEMP "colourMatik-diag.ccx"
+        foreach ($f in @($zip, $ccx)) { if (Test-Path $f) { Remove-Item -Force $f } }
+        $files = Get-ChildItem $srcPanel -File | Where-Object { $_.Extension -in ".json",".html",".js",".png" }
+        Compress-Archive -Path ($files | ForEach-Object { $_.FullName }) -DestinationPath $zip -Force
+        Move-Item $zip $ccx -Force
+        $out = (& $upia /install $ccx 2>&1 | Out-String).Trim()
+        if ($out) { Say ("  agent install: " + ($out -split "`n")[0]) }
+        if ($out -match "(?i)success") { Say "  panel REGISTERED through Adobe's agent - no developer mode needed" }
+        else { Say "  agent did not confirm - if the panel is missing, enable Settings > Plugins > developer mode once" }
+    }
     Say ""
     Say "NOW: quit Premiere completely and open it again."
     Say "If the panel is missing under Window > UXP Plugins, turn on"
