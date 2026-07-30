@@ -1,15 +1,24 @@
 # colourMatik - install / repair the UXP panel in Premiere Pro (Windows).
 #
-# Premiere does NOT honour a hand-written PluginsInfo\v1\premierepro.json. That
-# registry is owned by Adobe's agent, which ignores (or regenerates) hand edits -
-# which is why copying the files and writing that JSON left the panel invisible
-# even though everything on disk looked correct. Premiere loads a third-party UXP
-# panel through exactly two supported paths:
-#   1. Adobe's Unified Plugin Installer Agent (UPIA) - the same path a .ccx
-#      double-click in Creative Cloud takes. No Adobe signing needed for a plain
-#      HTML/JS panel. This is what we do.
-#   2. Developer Mode ON + the panel in Plugins\External\<id>_<version>\ - our
-#      fallback when Creative Cloud / UPIA isn't present.
+# How Premiere ACTUALLY finds third-party UXP panels (field-diagnosed from
+# Premiere's own UXPLogs on a machine where the panel refused to appear):
+#   1. The SYSTEM PluginsInfo registry:
+#        C:\Program Files\Common Files\Adobe\UXP\PluginsInfo\v1\premierepro.json
+#      written by Adobe's Unified Plugin Installer Agent (UPIA) when a .ccx is
+#      installed elevated. Entries use the token $systemPlugins, which resolves
+#      to C:\Program Files\Common Files\Adobe\UXP\Plugins. Premiere loads this
+#      FIRST, and an entry here claims the plugin id outright - even when its
+#      folder no longer exists ("failed to create/initialize plugin", and the
+#      same id is then never scanned anywhere else). That stale claim is how
+#      the panel stayed invisible for weeks while every fix rewrote the
+#      per-user registry below.
+#   2. The per-user %APPDATA%\Adobe\UXP\PluginsInfo\v1\premierepro.json - read
+#      afterwards; contributes nothing for an id already claimed at system
+#      level (Premiere logs "Number of plugins added from user's pluginsInfo: 0").
+#   3. Developer Mode ON + the panel in Plugins\External\<id>_<version>\ - the
+#      last-resort path when neither registration exists.
+# So: install through UPIA when it is present; when we are elevated and UPIA
+# fails, write the SYSTEM registration ourselves exactly the way UPIA would.
 #
 # Safe to run standalone to repair an install:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File install-panel.ps1
@@ -70,6 +79,18 @@ try {
 $Ext    = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\Plugins\External"
 $Folder = $PluginId + "_" + $Version
 $Dest   = Join-Path $Ext $Folder
+$IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Machine-level UXP roots. UPIA registers panels in the SYSTEM PluginsInfo file
+# under these roots, and Premiere trusts that file before anything per-user.
+$SysUxpRoots = @()
+foreach ($pfBase in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    if (-not $pfBase) { continue }
+    foreach ($sub in @("Common Files\Adobe\UXP", "Adobe\UXP")) {
+        $r = Join-Path $pfBase $sub
+        if (Test-Path $r) { $SysUxpRoots += $r }
+    }
+}
 
 function Remove-StaleColourMatik {
     # -IncludeAgentCopies: also delete the agent's own PluginsStorage copies.
@@ -146,6 +167,33 @@ function Remove-StaleColourMatik {
             } catch { Write-Warning ("Could not tidy " + $_.Name + " ($_).") }
         }
     }
+    # The SYSTEM PluginsInfo registry too. A stale row for our plugin id there
+    # (pointing at a deleted folder) claims the id and blocks EVERY later copy
+    # of the panel, per-user and dev-mode alike - Premiere logs "failed to
+    # create/initialize" and never rescans that id. This is the registry that
+    # was never cleaned in weeks of per-user fixes. Writable when elevated;
+    # a plain try/catch keeps non-elevated repair runs harmless.
+    foreach ($sysRoot in $script:SysUxpRoots) {
+        $sysReg = Join-Path $sysRoot "PluginsInfo\v1"
+        if (-not (Test-Path $sysReg)) { continue }
+        Get-ChildItem $sysReg -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                if ($j.plugins) {
+                    $keep = @($j.plugins | Where-Object {
+                        -not ($_.pluginId -eq $PluginId -and $_.versionString -ne $Version)
+                    })
+                    if ($keep.Count -ne @($j.plugins).Count) {
+                        Write-Host ("    removing stale SYSTEM registration(s) in " + $_.FullName)
+                        $j.plugins = $keep
+                        # Compact JSON without BOM - byte-for-byte the style UPIA writes.
+                        [IO.File]::WriteAllText($_.FullName, ($j | ConvertTo-Json -Depth 10 -Compress),
+                                                (New-Object Text.UTF8Encoding $false))
+                    }
+                }
+            } catch { Write-Warning ("Could not tidy SYSTEM " + $_.Name + " ($_ )- run elevated to clean it.") }
+        }
+    }
 }
 Remove-StaleColourMatik -IncludeAgentCopies
 
@@ -157,18 +205,56 @@ foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
     if (Test-Path $p) { $upia = $p; break }
 }
 
+function Invoke-Upia {
+    # ALWAYS run the agent with its working directory on the system drive.
+    # UPIA resolves the user profile drive-relatively ("\Users\<name>\..."
+    # without "C:"), so when it is launched from another drive - say a
+    # D:\Downloads folder, exactly where people run Setup.exe from - every
+    # install fails with status -198 ("Adobe folder neither exist, nor have
+    # the permission to create \Users\...") while the identical command
+    # succeeds from C:\. Field-diagnosed; this wrapper is not optional.
+    param([string[]]$UpiaArgs)
+    Push-Location ($env:SystemDrive + "\")
+    try { return (& $upia @UpiaArgs 2>&1 | Out-String) } finally { Pop-Location }
+}
+
+# An elevated cleanup/debug session can leave %APPDATA%\Adobe\UXP or ...\UPI
+# owned by BUILTIN\Administrators. UPIA validates folder OWNERSHIP
+# (createDirectoriesWithOwnership) and refuses every install with -198 until
+# the folders belong to the user again. Hand them back before calling it.
+if ($IsElevated) {
+    $ownerUser = Split-Path $UserProfile -Leaf
+    foreach ($own in @("AppData\Roaming\Adobe\UXP", "AppData\Roaming\Adobe\UPI")) {
+        $p = Join-Path $UserProfile $own
+        if (-not (Test-Path $p)) { continue }
+        try {
+            $curOwner = (Get-Acl $p).Owner
+            if ($curOwner -notlike ("*\" + $ownerUser)) {
+                icacls $p /setowner $ownerUser /T /C /Q 2>&1 | Out-Null
+                Write-Host ("    returned ownership of " + $p + " to " + $ownerUser + " (was " + $curOwner + ")")
+            }
+        } catch {}
+    }
+}
+
 $installed = $false
 $agentOk = $false
 if ($upia) {
     # Ask the agent to forget any previous colourMatik first — its database is
     # the source Premiere trusts, and an old registration there outlives every
     # file we delete by hand.
-    & $upia /remove com.colourmatik.panel 2>&1 | Select-String -Pattern "colourMatik|success|error" |
-        ForEach-Object { Write-Host ("    " + $_) }
+    # NOTE: /remove takes the extension NAME as shown by /list ("colourMatik"),
+    # NOT the plugin id - the id form fails with status -406 and the stale
+    # registration silently survives. Field-diagnosed. Name first, id second.
+    foreach ($rmArg in @($(if ($mf.name) { $mf.name } else { "colourMatik" }), $PluginId)) {
+        $rmOut = (Invoke-Upia @("/remove", $rmArg)).Trim()
+        if ($rmOut) { Write-Host ("    agent /remove " + $rmArg + ": " + (($rmOut -split "`r?`n") | Select-Object -Last 1)) }
+        if ($rmOut -match "(?i)successful") { break }
+    }
     Write-Host "==> Installing the panel through Adobe's plugin agent..."
     # NOTE: on Windows UPIA takes /flags. The macOS form (--install) silently
     # no-ops here, which looks exactly like "the installer did nothing".
-    $out = (& $upia /install $Ccx 2>&1 | Out-String).Trim()
+    $out = (Invoke-Upia @("/install", $Ccx)).Trim()
     if ($out) { Write-Host $out }
     if ($out -match "(?i)success") { $installed = $true }
     if ($installed) {
@@ -179,13 +265,18 @@ if ($upia) {
         # NOTE: no agent-copy purge here - that would delete what was just
         # installed. Only stale VERSIONED folders and registry rows are tidied.
         Remove-StaleColourMatik
-        & $upia /list all 2>&1 | Select-String -Pattern "colourMatik" | ForEach-Object { Write-Host "   $_" }
+        (Invoke-Upia @("/list", "all")) -split "`r?`n" | Select-String -Pattern "colourMatik" | ForEach-Object { Write-Host "   $_" }
         # Real verification: find a panel on disk whose OWN main.js reports the
         # version we just installed. "Agent said success" and "a folder exists"
         # both lied on real machines.
         $verified = $null
+        # Include the machine-wide root: an elevated agent install ("for all
+        # users") puts the files under Program Files\Common Files\Adobe\UXP,
+        # NOT in the per-user folders - without this the check called a
+        # perfectly good install a failure.
         $searchRoots = @((Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsStorage"),
                          (Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\Plugins\External"))
+        foreach ($sysRoot in $SysUxpRoots) { $searchRoots += (Join-Path $sysRoot "Plugins\External") }
         foreach ($sr in $searchRoots) {
             if (-not (Test-Path $sr)) { continue }
             Get-ChildItem $sr -Recurse -Filter "main.js" -ErrorAction SilentlyContinue |
@@ -206,7 +297,14 @@ if ($upia) {
             Write-Host "    (the agent reported success but no v$Version panel is on disk - installing it directly)"
         }
     }
-    if (-not $installed) { Write-Host "    (the agent didn't confirm the install - installing directly)" }
+    if (-not $installed) {
+        Write-Host "    (the agent didn't confirm the install - installing directly)"
+        if ($out -match "-198") {
+            Write-Host "    (status -198 usually means wrong folder ownership on %APPDATA%\Adobe\UXP or"
+            Write-Host "     the agent was started from a non-system drive; both are pre-handled above,"
+            Write-Host "     so if it persists run windows\diag.ps1 and send the report)"
+        }
+    }
 } else {
     Write-Host "==> Adobe's plugin agent isn't on this machine - using the developer-mode path."
 }
@@ -217,14 +315,52 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 foreach ($f in $PanelFiles) { Copy-Item (Join-Path $Src $f) $Dest -Force }
 Remove-StaleColourMatik
 
-# Write the UXP registry entry ourselves. macOS has always done this, which is
-# why the Mac panel never disappears; Windows trusted Adobe's agent alone, so
-# whenever that registration was absent the panel vanished from the UXP window
-# while its files sat right there on disk.
-$regDir2 = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1"
-if (-not (Test-Path $regDir2)) { New-Item -ItemType Directory -Force -Path $regDir2 | Out-Null }
+# When we are elevated and the agent did not do it, mirror EXACTLY what a
+# successful agent install writes: files in the machine-wide Plugins\External
+# and a row in the SYSTEM PluginsInfo registry (token $systemPlugins with
+# backslashes - copied verbatim from a working agent-written entry). This is
+# the registration Premiere provably loads; the per-user entry further below
+# is only belt-and-braces (Premiere reads it but adds 0 plugins from it when
+# the id is claimed at system level).
 $hostMin = "26.0"
 try { if ($mf.host -and $mf.host.minVersion) { $hostMin = $mf.host.minVersion } } catch {}
+if ($IsElevated -and -not $agentOk) {
+    try {
+        $sysPlugRoot = Join-Path $env:ProgramFiles "Common Files\Adobe\UXP"
+        $sysDest = Join-Path $sysPlugRoot ("Plugins\External\" + $Folder)
+        New-Item -ItemType Directory -Force -Path $sysDest | Out-Null
+        foreach ($f in $PanelFiles) { Copy-Item (Join-Path $Src $f) $sysDest -Force }
+        $sysRegDir = Join-Path $sysPlugRoot "PluginsInfo\v1"
+        if (-not (Test-Path $sysRegDir)) { New-Item -ItemType Directory -Force -Path $sysRegDir | Out-Null }
+        $sysRegFile = Join-Path $sysRegDir "premierepro.json"
+        if (-not (Test-Path $sysRegFile)) {
+            [IO.File]::WriteAllText($sysRegFile, '{"plugins":[]}', (New-Object Text.UTF8Encoding $false))
+        }
+        $sj = Get-Content $sysRegFile -Raw | ConvertFrom-Json
+        $skeep = @()
+        if ($sj.plugins) { $skeep = @($sj.plugins | Where-Object { $_.pluginId -ne $PluginId }) }
+        $skeep += [pscustomobject][ordered]@{
+            hostMinVersion = $hostMin
+            name           = $(if ($mf.name) { $mf.name } else { "colourMatik" })
+            path           = ('$systemPlugins\External\' + $Folder)
+            pluginId       = $PluginId
+            status         = "enabled"
+            type           = "uxp"
+            versionString  = $Version
+        }
+        $sj.plugins = $skeep
+        # Compact, no BOM - byte-for-byte the style the agent writes.
+        [IO.File]::WriteAllText($sysRegFile, ($sj | ConvertTo-Json -Depth 10 -Compress), (New-Object Text.UTF8Encoding $false))
+        Write-Host ("    registered SYSTEM-level -> " + '$systemPlugins\External\' + $Folder)
+        $agentOk = $true   # same net effect: the panel shows with no developer-mode toggle
+    } catch { Write-Warning ("Could not write the SYSTEM registration (" + $_.Exception.Message + ").") }
+}
+
+# Write the per-user UXP registry entry as well. macOS has always done this,
+# which is why the Mac panel never disappears; on Windows it is a last resort
+# for non-elevated repair runs.
+$regDir2 = Join-Path $UserProfile "AppData\Roaming\Adobe\UXP\PluginsInfo\v1"
+if (-not (Test-Path $regDir2)) { New-Item -ItemType Directory -Force -Path $regDir2 | Out-Null }
 $entry = [ordered]@{
     hostMinVersion = $hostMin
     name           = $(if ($mf.name) { $mf.name } else { "colourMatik" })

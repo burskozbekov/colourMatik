@@ -54,25 +54,29 @@ foreach ($root in (@((Join-Path $uxp "Plugins\External"), (Join-Path $uxp "Plugi
 }
 if (-not $found) { Say "  (none found)" }
 
-# -- every UXP registry file ------------------------------------------------
 # -- manifest sanity ---------------------------------------------------------
-# Premiere silently refuses a panel whose manifest asks for a permission it
-# does not accept - no error, no listing, just an empty UXP window. This is
-# what kept every build after 1.2.0 invisible on Windows.
+# Informational only. (An earlier theory blamed ".exe" in launchProcess for
+# the invisible panel; Premiere's own UXP logs on the field machine showed no
+# manifest rejection at all - the real blocker was a stale SYSTEM registration,
+# see below. The panel does not need ".exe": it never launches processes.)
 Say "--- manifest check ---"
-foreach ($mfp in (Get-ChildItem (Join-Path $uxp "Plugins\External") -Recurse -Filter "manifest.json" -ErrorAction SilentlyContinue)) {
-    try {
-        $mm = Get-Content $mfp.FullName -Raw | ConvertFrom-Json
-        if ($mm.id -notlike "com.colourmatik*") { continue }
-        $ext = @()
-        try { $ext = @($mm.requiredPermissions.launchProcess.extensions) } catch {}
-        $flag = ""
-        if ($ext -contains ".exe") { $flag = "  <-- .exe present: Premiere on Windows REFUSES this manifest" }
-        Say ("  v" + $mm.version + " launchProcess.extensions = [" + ($ext -join ", ") + "]" + $flag)
-    } catch { Say ("  unreadable manifest: " + $mfp.FullName) }
+$mfRoots = @((Join-Path $uxp "Plugins\External"))
+foreach ($mr0 in $machineRoots) { $mfRoots += $mr0 }
+foreach ($mfRoot in $mfRoots) {
+    foreach ($mfp in (Get-ChildItem $mfRoot -Recurse -Filter "manifest.json" -ErrorAction SilentlyContinue)) {
+        try {
+            $mm = Get-Content $mfp.FullName -Raw | ConvertFrom-Json
+            if ($mm.id -notlike "com.colourmatik*") { continue }
+            $ext = @()
+            try { $ext = @($mm.requiredPermissions.launchProcess.extensions) } catch {}
+            $flag = ""
+            if ($ext -contains ".exe") { $flag = "  <-- .exe present (not needed; current builds ship without it)" }
+            Say ("  v" + $mm.version + " launchProcess.extensions = [" + ($ext -join ", ") + "]" + $flag)
+        } catch { Say ("  unreadable manifest: " + $mfp.FullName) }
+    }
 }
 
-Say "--- UXP registries ---"
+Say "--- UXP registries (per-user) ---"
 $regDir = Join-Path $uxp "PluginsInfo\v1"
 if (Test-Path $regDir) {
     Get-ChildItem $regDir -Filter "*.json" | ForEach-Object {
@@ -84,6 +88,50 @@ if (Test-Path $regDir) {
         } catch { Say ("  " + $_.Name + " : UNREADABLE (" + $_.Exception.Message + ")") }
     }
 } else { Say "  (no PluginsInfo dir)" }
+
+# The SYSTEM PluginsInfo registry is the one Premiere loads FIRST (written by
+# Adobe's agent when a .ccx installs elevated; token $systemPlugins resolves to
+# C:\Program Files\Common Files\Adobe\UXP\Plugins). An entry here claims the
+# plugin id even when its folder is gone - Premiere then logs "failed to
+# create/initialize plugin" and never loads ANY other copy of the same id.
+# THIS was the weeks-long invisible-panel bug on the field machine.
+Say "--- UXP registries (SYSTEM - Premiere trusts these first) ---"
+$sysRegDirs = @()
+foreach ($pfBase in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    if (-not $pfBase) { continue }
+    foreach ($sub in @("Common Files\Adobe\UXP\PluginsInfo\v1", "Adobe\UXP\PluginsInfo\v1")) {
+        $r = Join-Path $pfBase $sub
+        if (Test-Path $r) { $sysRegDirs += $r }
+    }
+}
+if ($sysRegDirs) {
+    foreach ($sr in $sysRegDirs) {
+        Get-ChildItem $sr -Filter "*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                $ours = @($j.plugins | Where-Object { $_.pluginId -like "com.colourmatik*" })
+                foreach ($p in $ours) {
+                    $mark = ""
+                    $resolved = $p.path -replace '\$systemPlugins', (Join-Path (Split-Path (Split-Path $sr -Parent) -Parent) "Plugins") -replace '/', '\'
+                    if (-not (Test-Path $resolved)) { $mark = "  <-- STALE: folder is GONE, this entry BLOCKS the panel" }
+                    Say ("  " + $_.FullName + " : " + $p.pluginId + " v" + $p.versionString + " path=" + $p.path + $mark)
+                }
+                if (-not $ours) { Say ("  " + $_.FullName + " : no colourMatik entry") }
+            } catch { Say ("  " + $_.FullName + " : UNREADABLE (" + $_.Exception.Message + ")") }
+        }
+    }
+} else { Say "  (none found)" }
+
+# Wrong ownership of these two folders makes Adobe's agent refuse EVERY
+# install with status -198 (it validates ownership before touching them).
+# An elevated cleanup session is exactly what leaves them owned by
+# BUILTIN\Administrators instead of the user.
+Say "--- folder ownership (must belong to the user, not Administrators) ---"
+foreach ($ownPath in @((Join-Path $env:APPDATA "Adobe\UXP"), (Join-Path $env:APPDATA "Adobe\UPI"))) {
+    if (Test-Path $ownPath) {
+        try { Say ("  " + $ownPath + "  owner: " + (Get-Acl $ownPath).Owner) } catch {}
+    }
+}
 
 # -- Adobe plugin agent -------------------------------------------------------
 $upia = $null
@@ -106,8 +154,22 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
     $curVer = ((Get-Content (Join-Path $srcPanel "manifest.json") -Raw | ConvertFrom-Json).version)
     Say ("current panel available: v" + $curVer)
 
-    # 1) agent forgets us (its database outlives file deletion)
-    if ($upia) { & $upia /remove com.colourmatik.panel 2>&1 | Out-Null; Say "  agent /remove done" }
+    # 1) agent forgets us (its database outlives file deletion).
+    # /remove takes the extension NAME from /list ("colourMatik"), NOT the
+    # plugin id - the id form fails with -406 and the phantom row survives.
+    # And ALWAYS call the agent from the system drive: launched from another
+    # drive (a D:\Downloads folder) it mis-resolves the user profile and every
+    # install fails with -198. Both field-diagnosed.
+    if ($upia) {
+        Push-Location ($env:SystemDrive + "\")
+        try {
+            foreach ($rmArg in @("colourMatik", "com.colourmatik.panel")) {
+                $rmOut = (& $upia /remove $rmArg 2>&1 | Out-String).Trim()
+                Say ("  agent /remove " + $rmArg + ": " + (($rmOut -split "`r?`n") | Select-Object -Last 1))
+                if ($rmOut -match "(?i)successful") { break }
+            }
+        } finally { Pop-Location }
+    }
 
     # 2) delete every stale copy (per-user AND machine-wide, all hosts/versions)
     $needElevation = @()
@@ -150,6 +212,49 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
                 }
             } catch {}
         }
+    }
+
+    # 3b) SYSTEM registries + folder ownership. The SYSTEM PluginsInfo file is
+    # what Premiere trusts first: a stale colourMatik row there (folder gone)
+    # claims the plugin id and blocks every other copy - THE weeks-long
+    # invisible-panel bug. And wrong ownership of %APPDATA%\Adobe\UXP / UPI
+    # (left behind by elevated cleanups) makes the agent refuse installs
+    # with -198. Both need admin, so do them inline when we are admin and
+    # through one elevated helper script otherwise.
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $helper = @'
+param([string]$Ver, [string]$UserName, [string]$UserAppData)
+foreach ($d in @((Join-Path $env:ProgramFiles "Common Files\Adobe\UXP\PluginsInfo\v1"),
+                 (Join-Path $env:ProgramData "Adobe\UXP\PluginsInfo\v1"))) {
+    if (-not (Test-Path $d)) { continue }
+    Get-ChildItem $d -Filter "*.json" | ForEach-Object {
+        try {
+            $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
+            if ($j.plugins) {
+                $k = @($j.plugins | Where-Object { -not ($_.pluginId -eq "com.colourmatik.panel" -and $_.versionString -ne $Ver) })
+                if ($k.Count -ne @($j.plugins).Count) {
+                    $j.plugins = $k
+                    [IO.File]::WriteAllText($_.FullName, ($j | ConvertTo-Json -Depth 10 -Compress), (New-Object Text.UTF8Encoding $false))
+                }
+            }
+        } catch {}
+    }
+}
+foreach ($p in @((Join-Path $UserAppData "Adobe\UXP"), (Join-Path $UserAppData "Adobe\UPI"))) {
+    if (Test-Path $p) { icacls $p /setowner $UserName /T /C /Q | Out-Null }
+}
+'@
+    $helperPath = Join-Path $env:TEMP "colourmatik-sysfix.ps1"
+    Set-Content -Path $helperPath -Value $helper -Encoding ASCII
+    if ($isAdmin) {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $helperPath -Ver $curVer -UserName $env:USERNAME -UserAppData $env:APPDATA
+        Say "  SYSTEM registries cleaned + folder ownership returned to the user"
+    } else {
+        Say "  cleaning SYSTEM registries + folder ownership via an elevated window (approve the prompt)..."
+        try {
+            Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File",$helperPath,"-Ver",$curVer,"-UserName",$env:USERNAME,"-UserAppData",$env:APPDATA
+            Say "  done"
+        } catch { Say "  elevation declined - a stale SYSTEM entry can keep blocking the panel; run PowerShell as Administrator and re-run this diag." }
     }
 
     # 4) put the current panel in place (developer-mode path)
@@ -196,6 +301,7 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
         } catch { Say ("  could not write " + $regName + " (" + $_.Exception.Message + ")") }
     }
 
+    $agentDone = $false
     if ($upia) {
         $zip = Join-Path $env:TEMP "colourMatik-diag.zip"
         $ccx = Join-Path $env:TEMP "colourMatik-diag.ccx"
@@ -203,10 +309,46 @@ if (Test-Path (Join-Path $srcPanel "manifest.json")) {
         $files = Get-ChildItem $srcPanel -File | Where-Object { $_.Extension -in ".json",".html",".js",".png" }
         Compress-Archive -Path ($files | ForEach-Object { $_.FullName }) -DestinationPath $zip -Force
         Move-Item $zip $ccx -Force
-        $out = (& $upia /install $ccx 2>&1 | Out-String).Trim()
-        if ($out) { Say ("  agent install: " + ($out -split "`n")[0]) }
-        if ($out -match "(?i)success") { Say "  panel REGISTERED through Adobe's agent - no developer mode needed" }
-        else { Say "  agent did not confirm - if the panel is missing, enable Settings > Plugins > developer mode once" }
+        # From the system drive, ALWAYS (see the /remove note above: -198 otherwise).
+        Push-Location ($env:SystemDrive + "\")
+        try { $out = (& $upia /install $ccx 2>&1 | Out-String).Trim() } finally { Pop-Location }
+        if ($out) { Say ("  agent install: " + (($out -split "`r?`n") | Select-Object -Last 1)) }
+        if ($out -match "(?i)success") { Say "  panel REGISTERED through Adobe's agent - no developer mode needed"; $agentDone = $true }
+        else { Say "  agent did not confirm" }
+    }
+    # 5b) agent absent or refused, but we are admin: write the SYSTEM
+    # registration ourselves - files in the machine-wide Plugins\External plus
+    # a row in the SYSTEM premierepro.json, byte-for-byte the shape the agent
+    # writes ($systemPlugins token, backslashes, compact JSON, no BOM). This
+    # is the registration Premiere provably loads.
+    if (-not $agentDone -and $isAdmin) {
+        try {
+            $sysPlugRoot = Join-Path $env:ProgramFiles "Common Files\Adobe\UXP"
+            $sysDest = Join-Path $sysPlugRoot ("Plugins\External\" + $PluginFolder)
+            New-Item -ItemType Directory -Force -Path $sysDest | Out-Null
+            Copy-Item (Join-Path $srcPanel "*") $sysDest -Force -Exclude "*.ccx"
+            $sysRegDir = Join-Path $sysPlugRoot "PluginsInfo\v1"
+            if (-not (Test-Path $sysRegDir)) { New-Item -ItemType Directory -Force -Path $sysRegDir | Out-Null }
+            $sysRegFile = Join-Path $sysRegDir "premierepro.json"
+            if (-not (Test-Path $sysRegFile)) {
+                [IO.File]::WriteAllText($sysRegFile, '{"plugins":[]}', (New-Object Text.UTF8Encoding $false))
+            }
+            $sj = Get-Content $sysRegFile -Raw | ConvertFrom-Json
+            $skeep = @()
+            if ($sj.plugins) { $skeep = @($sj.plugins | Where-Object { $_.pluginId -ne "com.colourmatik.panel" }) }
+            $skeep += [pscustomobject][ordered]@{
+                hostMinVersion = $hostMin
+                name           = "colourMatik"
+                path           = ('$systemPlugins\External\' + $PluginFolder)
+                pluginId       = "com.colourmatik.panel"
+                status         = "enabled"
+                type           = "uxp"
+                versionString  = $curVer
+            }
+            $sj.plugins = $skeep
+            [IO.File]::WriteAllText($sysRegFile, ($sj | ConvertTo-Json -Depth 10 -Compress), (New-Object Text.UTF8Encoding $false))
+            Say ("  registered SYSTEM-level -> " + '$systemPlugins\External\' + $PluginFolder + " - no developer mode needed")
+        } catch { Say ("  could not write the SYSTEM registration (" + $_.Exception.Message + ")") }
     }
     Say ""
     Say "NOW: quit Premiere completely and open it again."
