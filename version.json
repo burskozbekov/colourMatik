@@ -1,5 +1,5 @@
 {
-  "version": "1.7.3",
+  "version": "1.7.4",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.7.3 — the real Windows fix, diagnosed on the affected machine: a stale system-level UXP registration (C:\\Program Files\\Common Files\\Adobe\\UXP\\PluginsInfo) claimed the plugin id and blocked every copy, Adobe's installer agent must be told /remove by NAME not id, and it must be invoked from the system drive or every install fails with -198. The installer now cleans the system registry, fixes folder ownership, and registers system-level itself when the agent can't."
+  "notes": "colourMatik 1.7.4 — no more ruined skies: the match judge now looks at the actual frame, not just the colour statistics. A reference with no sky could force a wide shot's blue sky through banded sepia (the distribution candidate won the statistical score while posterising smooth gradients). Candidates that roughen regions the source renders smooth are now heavily penalised, so the clean curve-based match wins on mismatched content while a genuinely good distribution match keeps winning on compatible clips."
 }

@@ -342,6 +342,41 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         s = lut_steepness(luts[name])
         scores[name] = float(scores[name]) * (1.0 + 0.15 * max(0.0, s - 4.0))
 
+    # Smooth-region damage penalty (distribution mode). The distribution judges
+    # are blind to WHERE colours land on the frame: IDT can "win" the
+    # sliced-Wasserstein while turning a clean sky gradient into posterised
+    # bands and hue arcs (field case: a no-sky wheat close-up as reference
+    # forced a wide shot's blue sky through banded brown — IDT scored 0.18 vs
+    # sep's 0.80 and shipped). So ALSO judge each candidate on the actual
+    # frame: how much it roughens regions the source renders smooth, in Oklab
+    # so banding and hue swings both count. Measured damage on the field pair:
+    # idt 3.14, sep 1.17, mkl 0.89; on a well-matched pair every candidate sits
+    # near 1.5 — so the penalty starts at 1.8 and is steep enough (x4 per unit)
+    # that a distribution win cannot buy back a posterised sky, while a benign
+    # IDT (damage under 1.8) keeps its earned win untouched.
+    if not corresponded:
+        try:
+            from PIL import Image as _ImD
+            _h, _w = src_enc.shape[:2]
+            _tw = min(320, _w); _th = max(1, int(_h * _tw / max(_w, 1)))
+            _sm = np.asarray(_ImD.fromarray(
+                (np.clip(src_enc, 0, 1) * 255 + 0.5).astype("uint8"))
+                .resize((_tw, _th))).astype(np.float64) / 255.0
+            def _gmag(ok):
+                _gx = np.diff(ok, axis=1)[:-1]; _gy = np.diff(ok, axis=0)[:, :-1]
+                return np.sqrt((_gx ** 2).sum(-1) + (_gy ** 2).sum(-1))
+            _gin = _gmag(cs.encoded_to_oklab(_sm, tf) * 100.0)
+            _msk = _gin <= max(1.0, float(np.percentile(_gin, 30)))
+            if _msk.sum() >= 400:      # enough smooth area to judge fairly
+                _gin_m = float(_gin[_msk].mean()) + 1e-9
+                for name in scores:
+                    _gout = _gmag(cs.encoded_to_oklab(
+                        apply_lut(_sm, luts[name]), tf) * 100.0)
+                    _dmg = float(_gout[_msk].mean()) / _gin_m
+                    scores[name] = float(scores[name]) * (1.0 + 4.0 * max(0.0, _dmg - 1.8))
+        except Exception:
+            pass                       # judging aid only — never sink the match
+
     best = min(scores, key=scores.get)
     res = MatchResult(method=best, scores=scores, lut=luts[best], tf=tf,
                       corresponded=corresponded, score_metric=metric)
