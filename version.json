@@ -1,5 +1,5 @@
 {
-  "version": "1.7.4",
+  "version": "1.7.5",
   "url": "https://github.com/burskozbekov/colourMatik/releases/latest/download/colourMatik-Setup.exe",
-  "notes": "colourMatik 1.7.4 — no more ruined skies: the match judge now looks at the actual frame, not just the colour statistics. A reference with no sky could force a wide shot's blue sky through banded sepia (the distribution candidate won the statistical score while posterising smooth gradients). Candidates that roughen regions the source renders smooth are now heavily penalised, so the clean curve-based match wins on mismatched content while a genuinely good distribution match keeps winning on compatible clips."
+  "notes": "colourMatik 1.7.5 — consistent matches, every time: the stable curve-based transfer (tone + white balance + palette, the way a colourist grades) is now the incumbent winner in Different-scene mode, and an exotic distribution map must beat it by a clear 25% margin — after the frame-damage penalties — to ship. Genuinely better statistical wins (9x on compatible clips) still ship; narrow statistical wins that scramble a sky no longer can."
 }

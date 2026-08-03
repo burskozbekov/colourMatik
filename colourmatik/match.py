@@ -378,6 +378,21 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             pass                       # judging aid only — never sink the match
 
     best = min(scores, key=scores.get)
+
+    # Incumbent rule (distribution mode): the 1D-curves + residual transfer
+    # ("sep") is the one candidate that never scrambles an image — it moves
+    # tone, WB and palette the way a colourist's global grade does. The
+    # exotic maps (idt/flow/uot) win the statistics whenever they force the
+    # reference's distribution, and the field showed they can do that while
+    # painting a smooth-but-wrong hue arc across a sky that neither the
+    # distance metrics nor the roughness guard can see. So they must now BEAT
+    # the incumbent by a clear margin (25% lower score, penalties included)
+    # to ship. A genuinely better match keeps winning — the field case where
+    # IDT deserves the crown scores 9x lower than sep, not 1.3x.
+    if not corresponded and "sep" in scores and best != "sep":
+        if scores[best] > 0.75 * scores["sep"]:
+            best = "sep"
+
     res = MatchResult(method=best, scores=scores, lut=luts[best], tf=tf,
                       corresponded=corresponded, score_metric=metric)
 
