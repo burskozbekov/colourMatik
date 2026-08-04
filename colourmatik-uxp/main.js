@@ -8,7 +8,7 @@ const uxp = require("uxp");
 
 const SERVER = "http://127.0.0.1:8765";
 const DEFAULT_INTENSITY = 100;   // 100 = the exact computed match; slider dials 0–200 live
-const LOCAL_VERSION = "1.7.5";
+const LOCAL_VERSION = "1.7.6";
 
 /* fetch with a hard timeout — a wedged engine must never freeze the panel */
 async function fetchT(url, opts, ms) {
@@ -189,7 +189,29 @@ async function getSelected() {
             const endS = te && typeof te.seconds === "number" ? te.seconds : null;
             if (posS != null && startS != null && endS != null &&
                 posS >= startS && posS < endS && inS != null) {
-              atS = inS + (posS - startS);
+              // SEQUENCE seconds x clip speed = SOURCE seconds. A 119.54% clip
+              // sampled without this reads a frame ~20% earlier than the one on
+              // screen (field case) - the whole match then describes the wrong
+              // moment. Speed unavailable or remapped/reversed -> drop the
+              // playhead capture entirely and let the in/out range sampling
+              // (which is speed-agnostic) take over.
+              let speed = 1.0;
+              try {
+                if (typeof c.getSpeed === "function") {
+                  const sp = await c.getSpeed();
+                  const v = (sp && typeof sp.value === "number") ? sp.value
+                          : (typeof sp === "number" ? sp : null);
+                  if (v != null && isFinite(v)) speed = v;
+                }
+              } catch (e) {}
+              if (speed > 0) {
+                atS = inS + (posS - startS) * speed;
+                // Clamp inside the used segment: a slowed clip's sequence
+                // offset can otherwise run past the out-point into leader /
+                // the next scene of the source file.
+                if (outS != null && atS > outS - 0.02) atS = Math.max(inS, outS - 0.02);
+              }
+              // speed <= 0 (reversed) -> atS stays null: range sampling instead.
             }
           } catch (e) {}
           return { path: p, trackItem: c, inS, outS, atS };
@@ -308,6 +330,10 @@ async function run() {
     srcIn: state.srcIn, srcOut: state.srcOut, refIn: state.refIn, refOut: state.refOut,
     srcAt: (typeof state.srcAt === "number") ? state.srcAt : null,
     refAt: (typeof state.refAt === "number") ? state.refAt : null,
+    // Freeze mode/tf too: the draft phase runs for seconds, and flipping the
+    // SCENE toggle or INPUT FORMAT mid-run used to make the hot-swapped full
+    // result compute under DIFFERENT settings than the draft on the clip.
+    mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", look: currentLook(),
   };
   $("run").disabled = true;
   $("preview").className = "hidden";
@@ -320,6 +346,7 @@ async function run() {
   const jobId = newJobId();
   startProgress(jobId);
   let ok = false;
+  let draftApplied = false;   // a draft LUT is live on the clip and must never outlive an error silently
   // INSTANT DRAFT: a 2-5s cheap match applied immediately, so the user sees the
   // look right away while the full contest (AI included) refines in the
   // background and hot-swaps the result. Any failure here is silently ignored -
@@ -329,7 +356,7 @@ async function run() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         source_path: tgt.srcPath, reference_path: tgt.refPath,
-        mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 3, look: currentLook(),
+        mode: tgt.mode, tf: tgt.tf, frames: 3, look: tgt.look,
         source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
         reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
         source_at: tgt.srcAt, reference_at: tgt.refAt,
@@ -344,8 +371,11 @@ async function run() {
       const de = await der.json();
       if (de && de.ok && gen === _runGen) {
         state.slot = de.slot;
-        try { await applyEffect(tgt.trackItem, de.slot, DEFAULT_INTENSITY); } catch (e) {}
-        setStatus("DRAFT", "Draft look applied - refining in the background...", "busy");
+        try {
+          await applyEffect(tgt.trackItem, de.slot, DEFAULT_INTENSITY);
+          draftApplied = true;
+          setStatus("DRAFT", "Draft look applied - refining in the background...", "busy");
+        } catch (e) {}
       }
     }
   } catch (e) {}
@@ -359,7 +389,7 @@ async function run() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_path: tgt.srcPath, reference_path: tgt.refPath,
-          mode: currentMode(), tf: ($("tf") && $("tf").value) || "sRGB", frames: 7, look: currentLook(),
+          mode: tgt.mode, tf: tgt.tf, frames: 7, look: tgt.look,
           source_in: tgt.srcIn ?? null, source_out: tgt.srcOut ?? null,
           reference_in: tgt.refIn ?? null, reference_out: tgt.refOut ?? null,
           source_at: tgt.srcAt, reference_at: tgt.refAt,
@@ -413,7 +443,11 @@ async function run() {
     if (!tgt.trackItem) {
       setStatus("DONE", `Matched — ${mTxt}${deTxt}. Select the TARGET clip on the timeline and Match & Apply again to auto-apply.`, "done");
     } else if (slot == null) {
-      setStatus("ERROR", "Match ok but the LUT slot couldn't be written — is the engine up to date?", "error");
+      // The full winner could not be baked: never leave the un-previewed DRAFT
+      // grade silently on the clip (the preview above shows the FULL winner -
+      // the timeline would render a different LUT than the panel displays).
+      if (draftApplied) { try { await applyEffect(tgt.trackItem, 0, DEFAULT_INTENSITY); } catch (e) {} }
+      setStatus("ERROR", "Match ok but the LUT slot couldn't be written — the draft grade was removed; re-run Match & Apply.", "error");
     } else {
       try {
         // The UXP apply call can occasionally resolve late; never let it wedge the
@@ -421,15 +455,19 @@ async function run() {
         // already added by then) so the button re-enables for the next clip.
         // The .catch() keeps a post-timeout rejection from surfacing as unhandled.
         const applying = applyEffect(tgt.trackItem, slot, DEFAULT_INTENSITY);
-        applying.catch(() => {});
-        // If this call resolves LATE (after the 6s race), the user may have
-        // already switched look / dragged sliders; re-assert their CURRENT
-        // choice so the stale apply can't silently revert it.
+        // If this call settles LATE (after the 6s race): on success, re-assert
+        // the user's CURRENT choice so the stale apply can't silently revert
+        // it; on FAILURE, downgrade the optimistic DONE we printed at timeout —
+        // otherwise the status says "applied" while the clip has the draft (or
+        // nothing).
         applying.then(() => {
           if (state.slot != null && state.slot !== slot && tgt.trackItem) {
             const pct = parseInt($("intensity").value, 10) || DEFAULT_INTENSITY;
             applyEffect(tgt.trackItem, state.slot, pct).catch(() => {});
           }
+        }, () => {
+          if (gen === _runGen)
+            setStatus("ERROR", "The effect could not be applied to the clip — re-run Match & Apply.", "error");
         }).catch(() => {});
         await Promise.race([
           applying,
@@ -446,7 +484,14 @@ async function run() {
       }
     }
   } catch (e) {
-    if (gen === _runGen) setStatus("ERROR", String(e.message || e), "error");
+    // Full pass failed after a draft was applied: roll the effect back to slot 0
+    // (identity) so the clip is never silently left graded by the cheap 3-frame
+    // draft nobody previewed or approved.
+    if (draftApplied && tgt.trackItem) {
+      try { applyEffect(tgt.trackItem, 0, DEFAULT_INTENSITY).catch(() => {}); } catch (e2) {}
+      state.slot = null;
+    }
+    if (gen === _runGen) setStatus("ERROR", String(e.message || e) + (draftApplied ? " (draft grade removed)" : ""), "error");
   } finally {
     // only the newest run may touch the shared bar/button state
     if (gen === _runGen) {
@@ -471,7 +516,10 @@ async function loadLibrary() {
       d.innerHTML = '<img src="' + it.thumb + '"><span class="lib-x">&times;</span>';
       d.addEventListener("click", () => {
         if (_matchingAll) return;               // batch params are frozen
-        state.refPath = it.path; state.refIn = null; state.refOut = null;
+        // refAt must reset too: a stale playhead time from a previously
+        // eyedropped TIMELINE reference would seek that second in the gallery
+        // asset and match one arbitrary frame nobody chose.
+        state.refPath = it.path; state.refIn = null; state.refOut = null; state.refAt = null;
         $("refName").textContent = it.name; $("refName").className = "slot-name set";
         refreshRun();
         setStatus("READY", "Reference set from the gallery.", "idle");

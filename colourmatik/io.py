@@ -96,6 +96,96 @@ def _probe_duration(video: str | Path) -> float | None:
     return None
 
 
+_COLOR_CACHE: dict[str, dict] = {}
+
+
+def _probe_color(video: str | Path) -> dict:
+    """Colour interpretation of the first video stream: pix_fmt, matrix, range,
+    transfer, primaries, height ('' when untagged). Cached per path; falls back
+    to parsing `ffmpeg -i` stderr on machines without ffprobe."""
+    key = str(video)
+    if key in _COLOR_CACHE:
+        return _COLOR_CACHE[key]
+    info = {"pix_fmt": "", "matrix": "", "range": "", "transfer": "",
+            "primaries": "", "height": 0}
+    if shutil.which("ffprobe"):
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries",
+                 "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries,height",
+                 "-of", "default=nw=1", str(video)],
+                capture_output=True, text=True, check=True,
+            )
+            for line in out.stdout.splitlines():
+                k, _, v = line.partition("=")
+                v = "" if v.strip() in ("unknown", "N/A", "") else v.strip()
+                if k == "pix_fmt": info["pix_fmt"] = v
+                elif k == "color_range": info["range"] = v
+                elif k == "color_space": info["matrix"] = v
+                elif k == "color_transfer": info["transfer"] = v
+                elif k == "color_primaries": info["primaries"] = v
+                elif k == "height":
+                    try: info["height"] = int(v)
+                    except Exception: pass
+        except Exception:
+            pass
+    if not info["height"]:
+        # bundled-ffmpeg machines: "Stream #0:0 ... Video: h264 ..., yuv420p(tv, bt709), 1920x1080"
+        try:
+            out = subprocess.run([_ffmpeg_exe(), "-hide_banner", "-i", str(video)],
+                                 capture_output=True, text=True)
+            m = re.search(r"Video:.*?,\s*(\w+)(?:\(([^)]*)\))?.*?(\d{2,5})x(\d{2,5})",
+                          out.stderr)
+            if m:
+                info["pix_fmt"] = info["pix_fmt"] or m.group(1)
+                info["height"] = int(m.group(4))
+                tags = (m.group(2) or "").lower()
+                if "pc" in tags.split(", "): info["range"] = "pc"
+                elif "tv" in tags.split(", "): info["range"] = "tv"
+                for tok in ("bt709", "bt2020nc", "bt2020", "smpte170m", "bt470bg"):
+                    if tok in tags: info["matrix"] = info["matrix"] or tok; break
+                for tok in ("arib-std-b67", "smpte2084", "bt709"):
+                    if tok in tags: info["transfer"] = info["transfer"] or tok; break
+        except Exception:
+            pass
+    _COLOR_CACHE[key] = info
+    return info
+
+
+def _decode_attempts(video: str | Path) -> list[list[str]]:
+    """ffmpeg filter args that make our YUV->RGB conversion match what Premiere
+    shows for the SAME file — tried in order until one works.
+
+    Without these, plain `ffmpeg -i clip out.png` converts untagged yuv through
+    swscale's BT.601 default, while Premiere assumes BT.709 for HD. The engine
+    then fits the LUT on colours the user never sees, and the native effect
+    applies it to Premiere's differently-decoded pixels: greens, reds and skin
+    drift on every untagged clip (AI-generated footage is almost always
+    untagged - field-verified on the reporting user's clips). HDR sources
+    (HLG/PQ, e.g. phone footage) additionally need tone-mapping to match
+    Premiere's SDR conform; without it the engine sees washed-out colours."""
+    info = _probe_color(video)
+    if info["pix_fmt"] and not info["pix_fmt"].startswith(("yuv", "nv", "p0", "p2")):
+        return [[]]                      # RGB-native codec: nothing to reinterpret
+    hdr = info["transfer"] in ("smpte2084", "arib-std-b67")
+    # matrix: honour the tag; untagged HD is BT.709 everywhere that matters
+    matrix_map = {"bt709": "bt709", "bt2020nc": "bt2020", "bt2020c": "bt2020",
+                  "smpte170m": "smpte170m", "bt470bg": "bt470bg", "bt601": "bt601"}
+    m = matrix_map.get(info["matrix"])
+    if m is None:
+        m = "bt709" if (info["height"] or 1080) >= 720 else "bt601"
+    r = "pc" if (info["range"] == "pc" or info["pix_fmt"].startswith("yuvj")) else "tv"
+    sdr = ["-vf", f"scale=in_color_matrix={m}:in_range={r}"]
+    if hdr:
+        # Match Premiere's HDR->SDR conform as closely as ffmpeg allows.
+        tm = ["-vf",
+              "zscale=transfer=linear:npl=100,tonemap=hable,"
+              "zscale=matrix=bt709:transfer=bt709:primaries=bt709:range=tv"]
+        return [tm, sdr, []]             # zscale may be absent in static builds
+    return [sdr, []]
+
+
 def _strip_black_bars(img: np.ndarray) -> np.ndarray:
     """Crop letterbox/pillarbox bars off a frame before it enters the match.
 
@@ -162,17 +252,23 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
         t = max(0.0, float(t))
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "frame.png"
-        try:
-            subprocess.run(
-                [_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
-                 "-i", str(video), "-frames:v", "1", str(out)],
-                check=True,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        last_err = None
+        for vf in _decode_attempts(video):
+            try:
+                subprocess.run(
+                    [_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
+                     "-i", str(video)] + vf + ["-frames:v", "1", str(out)],
+                    check=True,
+                )
+                last_err = None
+                break
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                last_err = e             # e.g. zscale missing in a static build
+        if last_err is not None:
             raise ValueError(
                 f"Couldn't extract a frame from '{Path(video).name}' — the clip may be "
                 f"corrupt, an unsupported codec, or offline."
-            ) from e
+            ) from last_err
         if not out.exists():                 # fast-seek past EOF writes nothing
             raise ValueError(
                 f"Couldn't read a frame from '{Path(video).name}' at {t:.2f}s "

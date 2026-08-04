@@ -5,6 +5,7 @@ Everything stays on your machine; nothing is uploaded anywhere.
 """
 from __future__ import annotations
 import base64
+import json
 import os
 import shutil
 import sys
@@ -75,6 +76,23 @@ async def _block_foreign_websites(request, call_next):
     return await call_next(request)
 WORK = Path(tempfile.gettempdir()) / "colourmatik_web"
 WORK.mkdir(exist_ok=True)
+
+# Every match is appended here as one JSON line (paths, mode, tf, frame times,
+# winner, scores). When a user reports "the colours came out wrong yesterday",
+# this file answers WHICH clips and WHAT the engine decided - the uvicorn access
+# log alone made that question unanswerable in the field.
+_MATCH_LOG = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "colourMatik" / "matches.log"
+
+
+def _log_match(entry: dict) -> None:
+    try:
+        import datetime as _dt
+        entry = {"time": _dt.datetime.now().isoformat(timespec="seconds"), **entry}
+        _MATCH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_MATCH_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 _RESULTS: dict[str, Path] = {}
 _JOBS: dict[str, dict] = {}  # rid -> {lut, tf, src1, ref1, corresponded} for live re-baking
 
@@ -177,7 +195,15 @@ def _next_slot() -> int:
                            default=0))
         except Exception:
             pass
-        n = n % 99999 + 1  # cycle 1..99999; never 0 (0 = effect's "no LUT" default)
+        # Never 0 (0 = the effect's "no LUT" default). NOT a modulo: once a
+        # slot_99999.cube existed on disk, `n % 99999 + 1` pinned EVERY later
+        # match to slot 1 forever (max(files) kept returning 99999) - and the
+        # native effect caches by slot number per session, so new matches
+        # silently rendered the first slot-1 look. Wrap past the cap, then skip
+        # over any number whose cube still exists so a live slot is never reused.
+        n = 1 if n >= 99999 else n + 1
+        while (_SLOT_DIR / f"slot_{n}.cube").exists():
+            n = 1 if n >= 99999 else n + 1
         try:
             _SLOT_COUNTER.write_text(str(n))
         except Exception:
@@ -302,17 +328,21 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
     # Preview uses ONE frame — reuse the first frame already decoded above (each
     # pooled VIDEO clip is n frames stacked vertically) instead of decoding again.
     # Images are never stacked, so they must not be sliced (a PNG target would
-    # otherwise preview as its top 1/f strip).
-    def _first_frame(arr, path):
+    # otherwise preview as its top 1/f strip). NOTE the per-side frame count: a
+    # playhead time (src_at/ref_at) decodes ONE frame regardless of `f` — slicing
+    # that by f showed only the top 1/f STRIP of the frame in every preview,
+    # wipe, alt thumbnail and dE number of every playhead match (the panel's
+    # default flow). The LUT itself was always fine; the previews lied.
+    def _first_frame(arr, path, n_frames):
         # Mirror load_any's routing: anything that is not a known STILL extension
-        # was decoded as video and arrives as f frames stacked vertically.
-        if f > 1 and Path(path).suffix.lower() not in cmio.IMAGE_EXTS:
-            h = arr.shape[0] // f
+        # was decoded as video and arrives as n_frames frames stacked vertically.
+        if n_frames > 1 and Path(path).suffix.lower() not in cmio.IMAGE_EXTS:
+            h = arr.shape[0] // n_frames
             if h > 0:
                 return arr[:h]
         return arr
-    src1 = _first_frame(src, src_path)
-    ref1 = _first_frame(ref, ref_path)
+    src1 = _first_frame(src, src_path, 1 if src_at is not None else f)
+    ref1 = _first_frame(ref, ref_path, 1 if ref_at is not None else f)
     if fast:
         preview, db, da = "", None, None       # the full pass renders the real preview
     else:
@@ -336,6 +366,12 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
                           "corresponded": corresponded, "alts": res.alts,
                           "scores": res.scores, "method": res.method,
                           "s_lin": res.sample_src_lin, "t_lin": res.sample_tgt_lin})
+    _log_match({"rid": rid, "target": str(src_path), "reference": str(ref_path),
+                "mode": mode, "tf": tf, "frames": f, "fast": bool(fast),
+                "src_at": src_at, "ref_at": ref_at,
+                "src_range": src_range, "ref_range": ref_range,
+                "winner": res.method, "corresponded": res.corresponded,
+                "scores": {k: round(float(v), 4) for k, v in res.scores.items()}})
     _set_progress(job_id, 1.0, "Done")
     return {
         "ok": True,
@@ -577,6 +613,18 @@ def effect_lut(req: EffectLutReq):
             lut = np.asarray(alt, dtype=np.float64)
             j["lut"] = lut          # strength/wipe operations follow the chosen look
             j.pop("_dec", None)     # decomposition belongs to the previous look
+        # NaN-guard the axis strengths (pydantic accepts the string "NaN" as a
+        # float; one NaN here would poison every node of the baked cube).
+        _ax = [req.wb, req.tone, req.color]
+        if not all(np.isfinite(v) for v in _ax):
+            req.wb, req.tone, req.color = 1.0, 1.0, 1.0
+        if (req.wb, req.tone, req.color) != (1.0, 1.0, 1.0) and j.get("s_lin") is None:
+            # No linear samples (MKL candidate absent): the decomposition cannot
+            # run. Say so instead of silently baking full strength while the
+            # panel UI claims reduced WB/Tone/Colour.
+            return JSONResponse({"ok": False, "error": "strength decomposition "
+                                 "unavailable for this match - use Intensity"},
+                                status_code=409)
         if (req.wb, req.tone, req.color) != (1.0, 1.0, 1.0) and j.get("s_lin") is not None:
             dec = j.get("_dec")
             if dec is None:
