@@ -386,7 +386,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         m = _naturalness(nat, luts[name], tf)
         pen *= 1.0 + 0.8 * max(0.0, m["detail"] - 1.5)
         pen *= 1.0 + 4.0 * max(0.0, m["clip_inc"] - 0.01)
-        pen *= 1.0 + 0.03 * max(0.0, m["twist"] - 20.0)
+        pen *= 1.0 + 0.05 * max(0.0, m["twist"] - 20.0)
         pen *= 1.0 + 0.5 * max(0.0, m["nspread"] - 2.0)
         pen *= 1.0 + 0.3 * max(0.0, m["uneven"] - 3.5)
         pen *= 1.0 + 4.0 * max(0.0, m["smooth"] - 1.8)
@@ -398,7 +398,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     # these limits the damage is unmistakable to any viewer, so such a candidate
     # is out of the running whenever a clean one exists.
     clean = [n for n in scores
-             if penalties[n][1]["twist"] <= 60.0 and penalties[n][1]["detail"] <= 3.0
+             if penalties[n][1]["twist"] <= 40.0 and penalties[n][1]["detail"] <= 3.0
              and penalties[n][1]["clip_inc"] <= 0.15 and penalties[n][1]["nspread"] <= 4.0
              and penalties[n][1]["uneven"] <= 8.0]
     if clean:
@@ -414,12 +414,14 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         best = ranked[0]
     # Incumbent rule: the hue-preserving grade is the one candidate that cannot
     # scramble a picture, so an exact-transport map (idt / flow / uot) has to
-    # BEAT it clearly — 20% lower score, penalties included — to ship. Where
+    # BEAT it clearly — 25% lower score, penalties included — to ship. Where
     # IDT genuinely belongs (two shots of one set) it scores 2-5x lower than
-    # the grade, not 1.1x; the near-ties are exactly the pairs where its extra
-    # "accuracy" is the reference's content forced onto the wrong objects.
+    # the grade, not 1.3x; the near-ties are exactly the pairs where its extra
+    # "accuracy" is the reference's content forced onto the wrong objects
+    # (the live engine crowned it at 0.48 vs 0.67 on the lamp pair, hue twist
+    # 48 deg — the lamp went white-green; the limits were set from that).
     if ("grade" in ranked and best in ("idt", "flow", "uot")
-            and scores[best] > 0.8 * scores["grade"]):
+            and scores[best] > 0.75 * scores["grade"]):
         best = "grade"
     res = MatchResult(method=best, scores=scores, lut=luts[best], tf=tf,
                       corresponded=corresponded, score_metric=metric)
