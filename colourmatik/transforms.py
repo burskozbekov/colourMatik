@@ -171,6 +171,152 @@ def fit_sep(src_lin: np.ndarray, tgt_lin: np.ndarray):
     return f
 
 
+# Oklab L of a display black / white that still holds detail (sRGB 6/255, 251/255)
+_L_BLACK, _L_WHITE = 0.12, 0.985
+
+
+def _slope_capped_curve(xs: np.ndarray, ys: np.ndarray, lo: float, hi: float,
+                        n: int = 41, protect: bool = True):
+    """Monotone quantile-matching curve xs -> ys with every local slope clipped to
+    [lo, hi], anchored at the median. Returns f(x) with linear extension.
+
+    With `protect`, source values that carry detail (not already black/white)
+    are never sent INTO black/white just because the reference has a lot of
+    it: a reference full of dark uniforms otherwise crushes a third of a bright
+    source to pure black (measured: 33% newly clipped). Matching a picture means
+    its shadows go dark, not that they vanish."""
+    qs = np.linspace(0.005, 0.995, n)
+    xq = np.quantile(xs, qs)
+    yq = np.quantile(ys, qs)
+    xq = np.maximum.accumulate(xq) + np.arange(n) * 1e-9
+    yq = np.maximum.accumulate(yq)
+    if protect:
+        yq = np.where(xq > _L_BLACK, np.maximum(yq, _L_BLACK), yq)
+        yq = np.where(xq < _L_WHITE, np.minimum(yq, _L_WHITE), yq)
+        yq = np.maximum.accumulate(yq)
+    sl = np.clip(np.diff(yq) / np.maximum(np.diff(xq), 1e-9), lo, hi)
+    mid = n // 2
+    y2 = np.empty_like(yq)
+    y2[mid] = yq[mid]
+    for i in range(mid, 0, -1):
+        y2[i - 1] = y2[i] - sl[i - 1] * (xq[i] - xq[i - 1])
+    for i in range(mid, n - 1):
+        y2[i + 1] = y2[i] + sl[i] * (xq[i + 1] - xq[i])
+    # Beyond the observed range nothing is known: extend gently (the curve is
+    # also the guard's fallback for every colour the clip never showed)
+    lo_m = float(np.clip(sl[0], 0.5, 1.5))
+    hi_m = float(np.clip(sl[-1], 0.5, 1.5))
+
+    def _eval(x, knots):
+        v = np.interp(x, xq, knots)
+        below = x < xq[0]
+        above = x > xq[-1]
+        v[below] = knots[0] + (x[below] - xq[0]) * lo_m
+        v[above] = knots[-1] + (x[above] - xq[-1]) * hi_m
+        return v
+    # Slope capping around the median leaves the MEAN off the reference (the
+    # picture reads darker/brighter than it should): shift the whole curve so
+    # the means agree, then re-apply the black/white protection, which must
+    # hold on the curve that is actually used.
+    shift = float(np.clip(np.mean(ys) - np.mean(_eval(np.asarray(xs, dtype=np.float64), y2)),
+                          -0.15, 0.15))
+    y2 = y2 + shift
+    if protect:
+        y2 = np.where(xq > _L_BLACK, np.maximum(y2, _L_BLACK), y2)
+        y2 = np.where(xq < _L_WHITE, np.minimum(y2, _L_WHITE), y2)
+        y2 = np.maximum.accumulate(y2)
+
+    def f(x):
+        return _eval(np.asarray(x, dtype=np.float64), y2)
+    return f
+
+
+def _chroma_shift_scale(ab_s: np.ndarray, ab_t: np.ndarray, ws=None, wt=None,
+                        cap=(0.5, 2.0)):
+    """Weighted mean shift + ISOTROPIC scale for Oklab chroma (a, b): the
+    colorist's tint/white-balance move plus a saturation change. Isotropic on
+    purpose: an anisotropic (covariance-matching) map rotates hues that are not
+    aligned with its axes (measured 31 deg on real footage vs 6 deg here), and
+    hue rotation is exactly what a match must never invent."""
+    def wmean(x, w):
+        return np.average(x, axis=0, weights=w) if w is not None else x.mean(0)
+
+    def wvar(x, w, mu):
+        d = ((x - mu) ** 2).sum(axis=1)
+        return float(np.average(d, weights=w)) if w is not None else float(d.mean())
+    mu_s, mu_t = wmean(ab_s, ws), wmean(ab_t, wt)
+    vs, vt = wvar(ab_s, ws, mu_s), wvar(ab_t, wt, mu_t)
+    s = float(np.clip(np.sqrt((vt + 1e-8) / (vs + 1e-8)), cap[0], cap[1]))
+    return mu_s, mu_t, s
+
+
+def fit_grade(src_lin: np.ndarray, tgt_lin: np.ndarray, slope=(0.33, 2.5),
+              chroma_cap=(0.5, 2.0), bands: int = 3):
+    """Hue-preserving 'colorist' transfer in Oklab (no correspondence needed).
+
+    What a grader actually does between two shots: a tone curve, a white-balance /
+    tint shift and a saturation change — never "turn this orange lamp green". The
+    full-distribution methods (IDT) do exactly that on unrelated content, because
+    exact mass matching must find SOME source pixels for every reference colour:
+    measured on real footage, an orange engine light became green against a
+    cockpit full of green screens, and a dark sweater grew green blotches from a
+    reference's green-screen tablet. This transfer cannot: lightness goes through
+    a monotone slope-capped curve (no contrast explosions, no banding), chroma
+    through a symmetric per-lightness-band affine map (lift/gamma/gain colour
+    wheels fitted from data, smooth in L so nothing can band). Hues stay hues.
+    """
+    from .colorspace import linear_to_oklab, oklab_to_linear
+    S = linear_to_oklab(np.clip(src_lin, 0.0, None))
+    T = linear_to_oklab(np.clip(tgt_lin, 0.0, None))
+    Lc = _slope_capped_curve(S[:, 0], T[:, 0], slope[0], slope[1])
+    g_mu_s, g_mu_t, g_s = _chroma_shift_scale(S[:, 1:], T[:, 1:], cap=chroma_cap)
+    # the saturation gain is only known for chroma the clip actually showed;
+    # beyond that it eases back to 1 so an unseen neon/flash can't be doubled
+    c_src = np.hypot(S[:, 1] - g_mu_s[0], S[:, 2] - g_mu_s[1])
+    c_seen = max(float(np.percentile(c_src, 98)), 0.02)
+    centers = np.linspace(0.2, 0.8, bands) if bands > 1 else np.array([0.5])
+    width = (centers[1] - centers[0]) if bands > 1 else 1.0
+
+    def wfun(L):
+        W = np.exp(-0.5 * ((L[:, None] - centers[None, :]) / (0.75 * width)) ** 2)
+        return W / np.maximum(W.sum(1, keepdims=True), 1e-9)
+    params = []
+    if bands > 1:
+        Ws, Wt = wfun(S[:, 0]), wfun(T[:, 0])
+        for b in range(bands):
+            mu_s, mu_t, sb = _chroma_shift_scale(S[:, 1:], T[:, 1:], Ws[:, b], Wt[:, b],
+                                                 cap=chroma_cap)
+            # a band with little data on either side is shrunk toward the global
+            # map, so an empty highlight band can't invent a cast that exists nowhere
+            n_eff = min(float(Ws[:, b].sum()), float(Wt[:, b].sum()))
+            t = n_eff / (n_eff + 4000.0)
+            params.append((mu_s * t + g_mu_s * (1 - t), mu_t * t + g_mu_t * (1 - t),
+                           sb * t + g_s * (1 - t)))
+    else:
+        params.append((g_mu_s, g_mu_t, g_s))
+
+    def f(x: np.ndarray) -> np.ndarray:
+        ok = linear_to_oklab(np.clip(np.atleast_2d(x), 0.0, None))
+        L2 = Lc(ok[:, 0])
+        ab = ok[:, 1:]
+        c = np.hypot(ab[:, 0] - g_mu_s[0], ab[:, 1] - g_mu_s[1])
+        ease = np.clip((c - c_seen) / c_seen, 0.0, 1.0)[:, None]   # 0 inside seen chroma -> 1 at 2x
+        if bands > 1:
+            W = wfun(ok[:, 0])
+            ab2 = np.zeros_like(ab)
+            for b, (mu_s, mu_t, sb) in enumerate(params):
+                gain = sb * (1.0 - ease) + 1.0 * ease
+                ab2 += W[:, b:b + 1] * ((ab - mu_s) * gain + mu_t)
+        else:
+            mu_s, mu_t, sb = params[0]
+            gain = sb * (1.0 - ease) + 1.0 * ease
+            ab2 = (ab - mu_s) * gain + mu_t
+        return oklab_to_linear(np.column_stack([np.clip(L2, 0.0, 1.0), ab2]))
+
+    f.kind = "grade"  # type: ignore[attr-defined]
+    return f
+
+
 def fit_uot(src_pts: np.ndarray, tgt_pts: np.ndarray, blur: float = 0.05,
             reach: float = 0.4) -> np.ndarray:
     """Unbalanced Sinkhorn transport of `src_pts` toward `tgt_pts` (linear RGB).

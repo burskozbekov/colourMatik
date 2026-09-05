@@ -69,8 +69,11 @@ def test_distribution():
     b = summarize(image_delta_e00(src, ref))["mean"]
     a = summarize(image_delta_e00(matched, ref))["mean"]
     print(f"  (ground-truth check) per-pixel dE00: before {b:.3f} -> after {a:.3f}")
-    check("distribution: IDT beats/equals MKL", res.scores["idt"] <= res.scores["mkl"] + 1e-6,
-          f"(idt {res.scores['idt']:.3f} vs mkl {res.scores['mkl']:.3f})")
+    # Same scene, known grade: the judge must keep the accurate candidate here
+    # (the naturalness penalties exist for UNRELATED content, not for this).
+    check("distribution: real dE00 after < 1.5", a < 1.5,
+          f"(after {a:.3f}, chose {res.method}; scores "
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(res.scores.items(), key=lambda kv: kv[1])) + ")")
     check("distribution: recolour improves real dE00 >=3x", b / max(a, 1e-9) >= 3.0,
           f"(before {b:.2f} -> after {a:.3f}, {b/max(a,1e-9):.1f}x)")
 
@@ -156,12 +159,138 @@ def test_identity():
     check("identity transform LUT ~ passthrough", d < 5e-3, f"(max|d|={d:.5f})")
 
 
+def test_decode_plan():
+    """Frames must be decoded the way Premiere shows them: matrix by tag (else
+    Rec.709 for HD / 601 for SD), range by tag, HDR tone-mapped to SDR."""
+    print("\n=== 4. Frame decoding: colour matrix / range / HDR plan ===")
+    from colourmatik import io as cmio
+    cases = {
+        "untagged HD -> bt709": (
+            "Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p(progressive), 1920x1080, 25921 kb/s, 24 fps",
+            "in_color_matrix=bt709:in_range=tv", None),
+        "untagged SD -> bt601": (
+            "Stream #0:0: Video: mpeg4, yuv420p, 720x576, 25 fps",
+            "in_color_matrix=bt601:in_range=tv", None),
+        "tagged 709 full-range": (
+            "Stream #0:1[0x2](und): Video: h264 (Constrained Baseline) (avc1 / 0x31637661), yuv420p(pc, bt709/bt709/iec61966-2-1, progressive), 1280x720, 14219 kb/s",
+            "in_color_matrix=bt709:in_range=pc", None),
+        "tagged 709 prores 4444 12-bit": (
+            "Stream #0:0[0x1]: Video: prores (4444) (ap4h / 0x68347061), yuv444p12le(tv, bt709, progressive), 4608x3164, 1976385 kb/s",
+            "in_color_matrix=bt709:in_range=tv", None),
+        "iPhone HLG -> bt2020 + tone-map": (
+            "Stream #0:0[0x1](und): Video: hevc (Main 10) (hvc1 / 0x31637668), yuv420p10le(tv, bt2020nc/bt2020/arib-std-b67), 1920x1080, 12635 kb/s, 25 fps",
+            "in_color_matrix=bt2020:in_range=tv", "arib-std-b67"),
+    }
+    for name, (banner, want, want_hdr) in cases.items():
+        args, hdr = cmio._decode_plan(cmio._parse_ffmpeg_banner(banner))
+        vf = args[args.index("-vf") + 1] if "-vf" in args else ""
+        check(f"decode plan: {name}", want in vf and hdr == want_hdr, f"(got {vf!r}, hdr={hdr})")
+    args, hdr = cmio._decode_plan(cmio._parse_ffmpeg_banner(
+        "Stream #0:0: Video: png, rgb24(pc), 1920x1080, 25 fps"))
+    check("decode plan: RGB source gets no matrix filter", args == [] and hdr is None, f"(got {args})")
+    d = cmio._parse_ffmpeg_banner("Duration: 00:01:02.50, start: 0.000000, bitrate: 1 kb/s")
+    check("banner duration parsed", abs(d.get("duration", 0) - 62.5) < 1e-6, f"(got {d})")
+
+    # HLG reference white (signal 0.75 = 203 nits, BT.2408) must land on SDR white,
+    # HLG black on black, and a pure BT.2020 red must stay red after the
+    # primaries conversion (no channel swap, no hue flip).
+    white = cmio._hdr_to_sdr(np.full((1, 1, 3), 0.75), "arib-std-b67")[0, 0]
+    black = cmio._hdr_to_sdr(np.zeros((1, 1, 3)), "arib-std-b67")[0, 0]
+    red = cmio._hdr_to_sdr(np.array([[[0.6, 0.0, 0.0]]]), "arib-std-b67")[0, 0]
+    check("HLG 0.75 -> SDR white", float(white.min()) > 0.93 and float(white.max()) <= 1.0, f"(got {white.round(3)})")
+    check("HLG 0 -> black", float(black.max()) < 1e-3, f"(got {black.round(4)})")
+    check("HLG red stays red", red[0] > 0.5 and red[1] < 0.2 and red[2] < 0.2, f"(got {red.round(3)})")
+    pq_white = cmio._hdr_to_sdr(np.full((1, 1, 3), 0.58), "smpte2084")[0, 0]
+    check("PQ 0.58 (~203 nits) -> SDR white", float(pq_white.min()) > 0.93, f"(got {pq_white.round(3)})")
+
+
+def _scene(rng, h=240, w=360):
+    """A soft-lit synthetic 'scene': gradient + shapes, moderate chroma."""
+    y, x = np.mgrid[0:h, 0:w].astype(np.float64)
+    base = 0.25 + 0.5 * (x / w) * (0.6 + 0.4 * (y / h))
+    img = np.stack([base * 0.95, base * 0.9, base * 1.0], -1)
+    for _ in range(12):
+        cy, cx, r = rng.uniform(0, h), rng.uniform(0, w), rng.uniform(15, 60)
+        m = ((y - cy) ** 2 + (x - cx) ** 2) < r * r
+        img[m] = np.clip(img[m] * rng.uniform(0.5, 1.5, 3) + rng.uniform(-0.15, 0.15, 3), 0, 1)
+    img += rng.normal(0, 0.01, img.shape)
+    return np.clip(img, 0.0, 1.0)
+
+
+def test_robustness():
+    """The field failures of 1.7.x, each reduced to a synthetic case that must
+    stay fixed: contrast explosion on a flat source, hue twisting of a colour
+    the reference lacks, green blotches from a small saturated reference prop,
+    a degenerate single-colour source, log-to-log identity, and 'Same scene'
+    clicked for two different shots."""
+    print("\n=== 6. Robustness on the field failure cases ===")
+    from colourmatik.match import _naturalness_probe, _naturalness
+    from colourmatik.colorspace import encoded_to_oklab
+    rng = np.random.default_rng(7)
+    wide = _scene(rng)                                   # a normal, wide-range reference
+
+    # 1) flat sky -> wide reference: no contrast explosion, no banding slopes
+    y, x = np.mgrid[0:240, 0:360].astype(np.float64)
+    sky = np.stack([0.55 + 0.04 * y / 240, 0.62 + 0.04 * y / 240, 0.72 + 0.03 * y / 240], -1)
+    sky = np.clip(sky + rng.normal(0, 0.004, sky.shape), 0, 1)
+    res = match(sky, wide, corresponded=False, size=33)
+    m = _naturalness(_naturalness_probe(sky, "sRGB"), res.lut, "sRGB")
+    check("flat sky: local contrast amplified < 2.5x", m["detail"] < 2.5,
+          f"(x{m['detail']:.2f}, chose {res.method})")
+    from colourmatik.lut import lut_steepness
+    check("flat sky: shipped LUT slope <= 6", lut_steepness(res.lut) <= 6.0 + 1e-6,
+          f"({lut_steepness(res.lut):.1f})")
+
+    # 2) orange lamp vs a reference full of green screens: the lamp stays orange
+    src = _scene(rng)
+    lamp = ((y - 120) ** 2 + (x - 180) ** 2) < 40 ** 2
+    src[lamp] = [0.95, 0.55, 0.15]
+    ref = _scene(rng)
+    scr = ((y - 100) ** 2 / 2 + (x - 200) ** 2) < 60 ** 2
+    ref[scr] = [0.15, 0.85, 0.35]
+    res = match(src, ref, corresponded=False, size=33)
+    out = apply_lut(src, res.lut)
+    ho = np.degrees(np.arctan2(*encoded_to_oklab(out[lamp].mean(0))[[2, 1]]))
+    hs = np.degrees(np.arctan2(*encoded_to_oklab(src[lamp].mean(0))[[2, 1]]))
+    dh = abs((ho - hs + 180) % 360 - 180)
+    check("orange lamp does not turn green", dh < 40, f"(hue moved {dh:.0f} deg, chose {res.method})")
+
+    # 3) a small saturated prop in the reference must not blotch the neutral source
+    neutral = np.repeat(np.linspace(0.15, 0.75, 360)[None, :, None], 240, axis=0)
+    neutral = np.clip(np.repeat(neutral, 3, axis=2) + rng.normal(0, 0.01, (240, 360, 3)), 0, 1)
+    res = match(neutral, ref, corresponded=False, size=33)
+    m = _naturalness(_naturalness_probe(neutral, "sRGB"), res.lut, "sRGB")
+    check("neutral source stays blotch-free (neutral spread < 2.5)", m["nspread"] < 2.5,
+          f"({m['nspread']:.2f}, chose {res.method})")
+
+    # 4) single-colour (green screen) source: finite, bounded, no explosion
+    flat = np.tile(np.array([0.1, 0.8, 0.2]), (240, 360, 1)) + rng.normal(0, 0.003, (240, 360, 3))
+    res = match(np.clip(flat, 0, 1), wide, corresponded=False, size=33)
+    check("green-screen source: LUT finite and in range",
+          np.isfinite(res.lut).all() and res.lut.min() >= 0 and res.lut.max() <= 1)
+    check("green-screen source: LUT slope bounded", lut_steepness(res.lut) <= 6.0 + 1e-6,
+          f"({lut_steepness(res.lut):.1f})")
+
+    # 5) log-to-log identity: matching a clip to itself in S-Log3 is a no-op
+    logc = np.clip(wide * 0.6 + 0.1, 0, 1)
+    res = match(logc, logc, corresponded=True, tf="SLog3", size=33)
+    d = float(np.abs(apply_lut(logc, res.lut) - logc).max())
+    check("S-Log3 self-match is identity", d < 0.02, f"(max|d|={d:.4f}, chose {res.method})")
+
+    # 6) 'Same scene' clicked for two different shots -> distribution fallback
+    res = match(_scene(rng), _scene(np.random.default_rng(99)), corresponded=True, size=33)
+    check("mis-clicked 'Same scene' falls back to distribution matching",
+          res.corresponded is False, f"(chose {res.method})")
+
+
 if __name__ == "__main__":
     test_accuracy()
     test_distribution()
     test_skin()
     test_lut_correctness()
     test_identity()
+    test_decode_plan()
+    test_robustness()
     print("\n" + ("=" * 48))
     if FAILS:
         print(f"FAILED: {len(FAILS)} -> {FAILS}")

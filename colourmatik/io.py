@@ -72,118 +72,156 @@ def save_image(path: str | Path, enc: np.ndarray) -> None:
     iio.imwrite(path, (a * 255.0 + 0.5).astype(np.uint8))
 
 
-def _probe_duration(video: str | Path) -> float | None:
-    if shutil.which("ffprobe"):
-        try:
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=nk=1:nw=1", str(video)],   # nw = noprint_wrappers (np is invalid)
-                capture_output=True, text=True, check=True,
-            )
-            return float(out.stdout.strip())
-        except Exception:
-            pass
-    # no ffprobe (bundled-ffmpeg machines): parse "Duration: HH:MM:SS.cc" from ffmpeg -i
-    try:
-        out = subprocess.run([_ffmpeg_exe(), "-hide_banner", "-i", str(video)],
-                             capture_output=True, text=True)
-        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out.stderr)
-        if m:
-            h, mnt, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-            return h * 3600 + mnt * 60 + s
-    except Exception:
-        pass
-    return None
+_PROBE_CACHE: dict = {}
 
 
-_COLOR_CACHE: dict[str, dict] = {}
-
-
-def _probe_color(video: str | Path) -> dict:
-    """Colour interpretation of the first video stream: pix_fmt, matrix, range,
-    transfer, primaries, height ('' when untagged). Cached per path; falls back
-    to parsing `ffmpeg -i` stderr on machines without ffprobe."""
-    key = str(video)
-    if key in _COLOR_CACHE:
-        return _COLOR_CACHE[key]
-    info = {"pix_fmt": "", "matrix": "", "range": "", "transfer": "",
-            "primaries": "", "height": 0}
-    if shutil.which("ffprobe"):
-        try:
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries",
-                 "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries,height",
-                 "-of", "default=nw=1", str(video)],
-                capture_output=True, text=True, check=True,
-            )
-            for line in out.stdout.splitlines():
-                k, _, v = line.partition("=")
-                v = "" if v.strip() in ("unknown", "N/A", "") else v.strip()
-                if k == "pix_fmt": info["pix_fmt"] = v
-                elif k == "color_range": info["range"] = v
-                elif k == "color_space": info["matrix"] = v
-                elif k == "color_transfer": info["transfer"] = v
-                elif k == "color_primaries": info["primaries"] = v
-                elif k == "height":
-                    try: info["height"] = int(v)
-                    except Exception: pass
-        except Exception:
-            pass
-    if not info["height"]:
-        # bundled-ffmpeg machines: "Stream #0:0 ... Video: h264 ..., yuv420p(tv, bt709), 1920x1080"
-        try:
-            out = subprocess.run([_ffmpeg_exe(), "-hide_banner", "-i", str(video)],
-                                 capture_output=True, text=True)
-            m = re.search(r"Video:.*?,\s*(\w+)(?:\(([^)]*)\))?.*?(\d{2,5})x(\d{2,5})",
-                          out.stderr)
-            if m:
-                info["pix_fmt"] = info["pix_fmt"] or m.group(1)
-                info["height"] = int(m.group(4))
-                tags = (m.group(2) or "").lower()
-                if "pc" in tags.split(", "): info["range"] = "pc"
-                elif "tv" in tags.split(", "): info["range"] = "tv"
-                for tok in ("bt709", "bt2020nc", "bt2020", "smpte170m", "bt470bg"):
-                    if tok in tags: info["matrix"] = info["matrix"] or tok; break
-                for tok in ("arib-std-b67", "smpte2084", "bt709"):
-                    if tok in tags: info["transfer"] = info["transfer"] or tok; break
-        except Exception:
-            pass
-    _COLOR_CACHE[key] = info
+def _parse_ffmpeg_banner(stderr: str) -> dict:
+    """Pull duration + the video stream's pixel format / colour tags out of
+    `ffmpeg -i` stderr (bundled-ffmpeg machines have no ffprobe). Handles
+    'yuv420p(tv, bt709, progressive)', 'yuv420p10le(tv, bt2020nc/bt2020/arib-std-b67)',
+    'yuv420p(pc, bt709/bt709/iec61966-2-1, progressive)' and plain 'yuv420p'."""
+    info: dict = {}
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr)
+    if m:
+        h, mnt, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        info["duration"] = h * 3600 + mnt * 60 + s
+    m = re.search(r"Video:.*?,\s*([a-z0-9]+)(?:\(([^)]*)\))?,\s*(\d+)x(\d+)", stderr)
+    if m:
+        info["pix_fmt"] = m.group(1)
+        info["width"], info["height"] = int(m.group(3)), int(m.group(4))
+        for tok in (m.group(2) or "").split(","):
+            tok = tok.strip()
+            if tok in ("tv", "pc"):
+                info["color_range"] = tok
+            elif "/" in tok:
+                parts = tok.split("/")
+                info["color_space"] = parts[0]
+                info["color_primaries"] = parts[1] if len(parts) > 1 else parts[0]
+                info["color_transfer"] = parts[2] if len(parts) > 2 else parts[0]
+            elif tok.startswith(("bt", "smpte", "fcc", "arib", "iec", "ycgco")):
+                info["color_space"] = info["color_primaries"] = info["color_transfer"] = tok
     return info
 
 
-def _decode_attempts(video: str | Path) -> list[list[str]]:
-    """ffmpeg filter args that make our YUV->RGB conversion match what Premiere
-    shows for the SAME file — tried in order until one works.
+def _probe_video(video: str | Path) -> dict:
+    """Duration, size, pixel format and colour tags of the first video stream.
+    Missing/unknown tags are simply absent. Cached per (path, mtime, size)."""
+    p = Path(video)
+    try:
+        st = p.stat()
+        key = (str(p), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(p), 0, 0)
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    info: dict = {}
+    if shutil.which("ffprobe"):
+        try:
+            import json
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=width,height,pix_fmt,color_range,color_space,color_transfer,"
+                 "color_primaries:format=duration", "-of", "json", str(video)],
+                capture_output=True, text=True, check=True, timeout=30)
+            j = json.loads(out.stdout or "{}")
+            for k, v in (j.get("streams") or [{}])[0].items():
+                if v not in (None, "", "unknown", "unspecified"):
+                    info[k] = v
+            d = (j.get("format") or {}).get("duration")
+            if d not in (None, "", "N/A"):
+                info["duration"] = float(d)
+        except Exception:
+            info = {}
+    if "duration" not in info or "pix_fmt" not in info:
+        try:
+            out = subprocess.run([_ffmpeg_exe(), "-hide_banner", "-i", str(video)],
+                                 capture_output=True, text=True, timeout=30)
+            for k, v in _parse_ffmpeg_banner(out.stderr).items():
+                info.setdefault(k, v)
+        except Exception:
+            pass
+    _PROBE_CACHE[key] = info
+    return info
 
-    Without these, plain `ffmpeg -i clip out.png` converts untagged yuv through
-    swscale's BT.601 default, while Premiere assumes BT.709 for HD. The engine
-    then fits the LUT on colours the user never sees, and the native effect
-    applies it to Premiere's differently-decoded pixels: greens, reds and skin
-    drift on every untagged clip (AI-generated footage is almost always
-    untagged - field-verified on the reporting user's clips). HDR sources
-    (HLG/PQ, e.g. phone footage) additionally need tone-mapping to match
-    Premiere's SDR conform; without it the engine sees washed-out colours."""
-    info = _probe_color(video)
-    if info["pix_fmt"] and not info["pix_fmt"].startswith(("yuv", "nv", "p0", "p2")):
-        return [[]]                      # RGB-native codec: nothing to reinterpret
-    hdr = info["transfer"] in ("smpte2084", "arib-std-b67")
-    # matrix: honour the tag; untagged HD is BT.709 everywhere that matters
-    matrix_map = {"bt709": "bt709", "bt2020nc": "bt2020", "bt2020c": "bt2020",
-                  "smpte170m": "smpte170m", "bt470bg": "bt470bg", "bt601": "bt601"}
-    m = matrix_map.get(info["matrix"])
-    if m is None:
-        m = "bt709" if (info["height"] or 1080) >= 720 else "bt601"
-    r = "pc" if (info["range"] == "pc" or info["pix_fmt"].startswith("yuvj")) else "tv"
-    sdr = ["-vf", f"scale=in_color_matrix={m}:in_range={r}"]
+
+def _probe_duration(video: str | Path) -> float | None:
+    return _probe_video(video).get("duration")
+
+
+# ffprobe colour_space tag -> the name libswscale's `scale` filter understands
+_SWS_MATRIX = {"bt709": "bt709", "bt470bg": "bt470", "smpte170m": "smpte170m",
+               "smpte240m": "smpte240m", "bt2020nc": "bt2020", "bt2020c": "bt2020",
+               "fcc": "fcc"}
+_HDR_TRANSFERS = {"arib-std-b67", "smpte2084"}
+
+
+def _decode_plan(info: dict) -> tuple[list, str | None]:
+    """How to turn this clip's frames into the RGB Premiere itself shows.
+
+    Returns (extra ffmpeg args, hdr_transfer). hdr_transfer is the HLG/PQ curve
+    name when the clip is HDR (so the caller tone-maps the 16-bit output), else None.
+
+    libswscale converts an UNTAGGED clip with BT.601 coefficients regardless of
+    size, while Premiere (like every NLE) treats untagged HD as Rec.709 — measured
+    on the AI-generated clips this tool is mostly used on (all untagged): mean
+    1.8/255, up to 7/255 of hue/saturation error baked into every match. Pick the
+    matrix the way Premiere does: the tag when present, else Rec.709 for HD and
+    601 for SD. Only YUV sources get the filter; RGB sources have no matrix."""
+    pix = str(info.get("pix_fmt", ""))
+    is_yuv = pix.startswith(("yuv", "yuvj", "nv", "p0", "p2", "p4", "uyvy", "yuyv", "y4"))
+    if not is_yuv:
+        return [], None
+    w, h = int(info.get("width", 0) or 0), int(info.get("height", 0) or 0)
+    trc = str(info.get("color_transfer", ""))
+    csp = str(info.get("color_space", ""))
+    prim = str(info.get("color_primaries", ""))
+    rng = "pc" if info.get("color_range") == "pc" or pix.startswith("yuvj") else "tv"
+    hdr = trc in _HDR_TRANSFERS or csp.startswith("bt2020") or prim == "bt2020"
     if hdr:
-        # Match Premiere's HDR->SDR conform as closely as ffmpeg allows.
-        tm = ["-vf",
-              "zscale=transfer=linear:npl=100,tonemap=hable,"
-              "zscale=matrix=bt709:transfer=bt709:primaries=bt709:range=tv"]
-        return [tm, sdr, []]             # zscale may be absent in static builds
-    return [sdr, []]
+        matrix = "bt2020"
+        hdr_trc = trc if trc in _HDR_TRANSFERS else "arib-std-b67"
+    else:
+        matrix = _SWS_MATRIX.get(csp) or ("bt709" if (h >= 720 or w >= 1280) else "bt601")
+        hdr_trc = None
+    args = ["-vf", f"scale=in_color_matrix={matrix}:in_range={rng}:out_range=pc"]
+    if hdr:
+        args += ["-pix_fmt", "rgb48be"]        # keep the HDR signal's precision for tone-mapping
+    return args, hdr_trc
+
+
+# BT.2020 -> BT.709 primaries (linear light), colour-science matrix_RGB_to_RGB
+_M_2020_TO_709 = np.array([[1.66049, -0.58764, -0.07285],
+                           [-0.12455, 1.13290, -0.00835],
+                           [-0.01815, -0.10058, 1.11873]])
+
+
+def _hdr_to_sdr(rgb: np.ndarray, trc: str) -> np.ndarray:
+    """Tone-map a BT.2020 HLG/PQ frame (non-linear [0,1]) to the SDR sRGB frame
+    Premiere's automatic tone-mapping shows in a Rec.709 sequence.
+
+    Without this an iPhone HLG clip enters the match as its raw flat, desaturated,
+    green-tinted signal, so any match to or from it lands on colours that never
+    appear on the user's screen. Reference white follows ITU-R BT.2408 (203 nits ->
+    SDR 1.0); highlights above 80% roll off through a soft shoulder instead of
+    clipping, and BT.2020 primaries are converted to Rec.709."""
+    e = np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 1.0)
+    if trc == "smpte2084":                                  # PQ (ST 2084) EOTF -> nits
+        m1, m2 = 2610.0 / 16384.0, 2523.0 / 4096.0 * 128.0
+        c1, c2, c3 = 3424.0 / 4096.0, 2413.0 / 4096.0 * 32.0, 2392.0 / 4096.0 * 32.0
+        ep = np.power(e, 1.0 / m2)
+        nits = 10000.0 * np.power(np.clip(ep - c1, 0.0, None) / (c2 - c3 * ep), 1.0 / m1)
+    else:                                                   # HLG (ARIB STD-B67 / BT.2100)
+        a, b, c = 0.17883277, 0.28466892, 0.55991073
+        scene = np.where(e <= 0.5, (e * e) / 3.0, (np.exp((e - c) / a) + b) / 12.0)
+        y = scene[..., 0] * 0.2627 + scene[..., 1] * 0.6780 + scene[..., 2] * 0.0593
+        nits = 1000.0 * np.power(np.clip(y, 1e-12, None), 0.2)[..., None] * scene
+    lin = (nits / 203.0) @ _M_2020_TO_709.T
+    lin = np.clip(lin, 0.0, None)
+    k = 0.8
+    over = lin > k
+    lin[over] = k + (1.0 - k) * (1.0 - np.exp(-(lin[over] - k) / (1.0 - k)))
+    from .colorspace import encode
+    return np.clip(encode(np.clip(lin, 0.0, 1.0), "sRGB"), 0.0, 1.0)
 
 
 def _strip_black_bars(img: np.ndarray) -> np.ndarray:
@@ -250,31 +288,32 @@ def extract_frame(video: str | Path, t: float | None = None) -> np.ndarray:
         t = max(0.0, min(float(t), dur - margin))
     else:
         t = max(0.0, float(t))
+    extra, hdr_trc = _decode_plan(_probe_video(video))
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "frame.png"
-        last_err = None
-        for vf in _decode_attempts(video):
+        base = [_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
+                "-i", str(video), "-frames:v", "1"]
+        try:
             try:
-                subprocess.run(
-                    [_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{t:.3f}",
-                     "-i", str(video)] + vf + ["-frames:v", "1", str(out)],
-                    check=True,
-                )
-                last_err = None
-                break
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                last_err = e             # e.g. zscale missing in a static build
-        if last_err is not None:
+                subprocess.run(base + extra + [str(out)], check=True)
+            except subprocess.CalledProcessError:
+                if not extra:
+                    raise
+                # an exotic build without the scale options: plain decode beats no frame
+                extra, hdr_trc = [], None
+                subprocess.run(base + [str(out)], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
             raise ValueError(
                 f"Couldn't extract a frame from '{Path(video).name}' — the clip may be "
                 f"corrupt, an unsupported codec, or offline."
-            ) from last_err
+            ) from e
         if not out.exists():                 # fast-seek past EOF writes nothing
             raise ValueError(
                 f"Couldn't read a frame from '{Path(video).name}' at {t:.2f}s "
                 f"(is the requested time past the end of the clip?)."
             )
-        return load_image(out)
+        img = load_image(out)
+        return _hdr_to_sdr(img, hdr_trc) if hdr_trc else img
 
 
 def extract_frames(video: str | Path, n: int = 3,

@@ -224,6 +224,7 @@ _METHOD_LABELS = {
     "canon": "AI grade (CanonCGT)",
     "neural": "AI scene-match",
     "idt": "distribution (IDT)",
+    "grade": "colorist grade (tone + balance)",
     "mkl": "linear (MKL)",
     "lattice": "3D lattice",
     "poly1": "linear fit", "poly2": "polynomial", "poly3": "polynomial",
@@ -260,6 +261,19 @@ def _save_upload(up: UploadFile, dst_dir: Path) -> Path:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return PAGE
+
+
+def _frame_is_degenerate(img: np.ndarray) -> bool:
+    """True for a frame with (almost) no colour information to match: near-black
+    or near-white over most of the picture, or essentially flat."""
+    a = np.asarray(img, dtype=np.float32)
+    if a.ndim != 3 or a.shape[0] * a.shape[1] < 64:
+        return False
+    small = a[::max(1, a.shape[0] // 180), ::max(1, a.shape[1] // 320)]
+    luma = 0.2126 * small[..., 0] + 0.7152 * small[..., 1] + 0.0722 * small[..., 2]
+    if float(np.mean(luma < 0.04)) > 0.85 or float(np.mean(luma > 0.96)) > 0.85:
+        return True
+    return float(luma.std()) < 0.015 and float(small.reshape(-1, 3).std(axis=0).max()) < 0.02
 
 
 def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
@@ -307,6 +321,26 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
             fr = ex.submit(cmio.load_any, ref_path, frames=f, start=ri, end=ro,
                            robust=not corresponded)
         src, ref = fs.result(), fr.result()
+    src_n = 1 if src_at is not None else f      # frames stacked per side (preview slicing)
+    ref_n = 1 if ref_at is not None else f
+
+    # "Take the colour from the frame I am showing you" is only meaningful when
+    # that frame HAS colour. A playhead parked on a fade, a black leader, a white
+    # flash or a flat wall hands the match a degenerate distribution, and every
+    # method then drives the whole clip to that nothing (seen: a day exterior
+    # crushed to 70% pure black by an explosion clip's black lead-in frame). Fall
+    # back to sampling across the clip in that case and say so in the report.
+    _frame_notes = []
+    if src_at is not None and _frame_is_degenerate(src):
+        src = cmio.load_any(src_path, frames=f, start=si, end=so, robust=not corresponded)
+        src_n = f
+        _frame_notes.append(f"the source frame at {float(src_at):.2f}s is nearly "
+                            "black/white/flat - sampled across the clip instead")
+    if ref_at is not None and _frame_is_degenerate(ref):
+        ref = cmio.load_any(ref_path, frames=f, start=ri, end=ro, robust=not corresponded)
+        ref_n = f
+        _frame_notes.append(f"the reference frame at {float(ref_at):.2f}s is nearly "
+                            "black/white/flat - sampled across the clip instead")
 
     _set_progress(job_id, 0.16, "Analysing colour")
     # match() spans 16%..82% of the bar; forward its internal milestones.
@@ -318,6 +352,8 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
     res = match(src, ref, corresponded=corresponded, tf=tf, look=look, quick=fast,
                 neural=False, refine=False,
                 progress=lambda p, m: _set_progress(job_id, 0.16 + p * 0.66, m))
+
+    res.notes.extend(_frame_notes)
 
     _set_progress(job_id, 0.84, "Baking the LUT")
     cube = job / "colourMatik.cube"
@@ -341,8 +377,8 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
             if h > 0:
                 return arr[:h]
         return arr
-    src1 = _first_frame(src, src_path, 1 if src_at is not None else f)
-    ref1 = _first_frame(ref, ref_path, 1 if ref_at is not None else f)
+    src1 = _first_frame(src, src_path, src_n)
+    ref1 = _first_frame(ref, ref_path, ref_n)
     if fast:
         preview, db, da = "", None, None       # the full pass renders the real preview
     else:
@@ -371,7 +407,8 @@ def _process(src_path: Path, ref_path: Path, mode: str, tf: str, frames: int,
                 "src_at": src_at, "ref_at": ref_at,
                 "src_range": src_range, "ref_range": ref_range,
                 "winner": res.method, "corresponded": res.corresponded,
-                "scores": {k: round(float(v), 4) for k, v in res.scores.items()}})
+                "scores": {k: round(float(v), 4) for k, v in res.scores.items()},
+                "notes": list(res.notes)})
     _set_progress(job_id, 1.0, "Done")
     return {
         "ok": True,

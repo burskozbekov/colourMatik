@@ -174,6 +174,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
 
     luts: dict = {}
     nctx = None  # local-AI (segmentation) context, set in distribution mode if available
+    _gate_note = None
     if corresponded:
         # Same content, pixel-aligned: learn the exact map from source->target pairs.
         for d in degrees:
@@ -183,6 +184,7 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             tf_mod.fit_lut_lattice(Sf_enc, Tf_enc, L=lattice_L, weights=weights), size)
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)
         luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)
+        luts["grade"] = build_lut(tf_mod.fit_grade(Sf_lin, Tf_lin), size=size, tf=tf)
     else:
         # Different scenes / not aligned: match the colour DISTRIBUTIONS.
         _p(0.10, "Matching colour distributions")
@@ -203,8 +205,29 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             _flow_th.start()
         luts["mkl"] = build_lut(tf_mod.fit_mkl(Sf_lin, Tf_lin), size=size, tf=tf)  # linear
         luts["sep"] = build_lut(tf_mod.fit_sep(Sf_lin, Tf_lin), size=size, tf=tf)  # 1D curves + 3D residual
+        # Hue-preserving Oklab "colorist" transfer: tone curve + balance + saturation.
+        # Cheap (0.2s), so the draft has it too — the draft and the final then
+        # agree whenever the full contest also lands on it.
+        luts["grade"] = build_lut(tf_mod.fit_grade(Sf_lin, Tf_lin), size=size, tf=tf)
+        # How alike are the two pictures' colour worlds? Exact-distribution
+        # transport (IDT) is a superb match between shots of the same kind of
+        # content and a wrecking ball between unrelated ones: on real footage
+        # every pairing beyond ~8 Oklab units (a selfie vs a classroom, a hand
+        # vs a night sky) came back blotched or posterised, while the colorist
+        # grade stayed clean. Skip it there — it would only cost 3-9 s to lose.
+        _gate_n = 20_000
+        _gs = rng.choice(Sf_enc.shape[0], min(_gate_n, Sf_enc.shape[0]), replace=False)
+        _gt = rng.choice(Tf_enc.shape[0], min(_gate_n, Tf_enc.shape[0]), replace=False)
+        scene_gap = sliced_wasserstein(cs.encoded_to_oklab(Sf_enc[_gs], tf) * 100.0,
+                                       cs.encoded_to_oklab(Tf_enc[_gt], tf) * 100.0,
+                                       n_proj=32, seed=seed)
         if quick:
             transported = None
+        elif scene_gap > 8.0:
+            transported = None
+            _gate_note = (f"the two clips show very different colour worlds (distance "
+                          f"{scene_gap:.1f}); exact distribution transport skipped, "
+                          "matched tone, balance and saturation instead")
         else:
             # IDT + the lattice both scale with point count, and together they
             # were the single biggest cost of a match (profiled 9.7s of ~20s on
@@ -233,8 +256,8 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         # AI extras). Fixes IDT's exact-mass failure: a reference dominated by one
         # colour (a huge sky) no longer forces that colour onto unrelated content.
         try:
-            if quick:
-                raise ImportError("quick mode skips uot")
+            if quick or not neural:
+                raise ImportError("uot belongs to the optional AI stack")
             _u = np.random.default_rng(seed + 1)
             cap = 6_000   # tensorized Sinkhorn is O(N*M); 6k points describe a 3D colour cloud fine
             ui = (_u.choice(Sf_lin.shape[0], cap, replace=False)
@@ -269,6 +292,19 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     # CIELAB's blue-drifts-purple defect, so the judge can no longer be gamed by
     # hue errors CIELAB under-counts. Reported accuracy (de_after) stays dE00 —
     # the industry-familiar number.
+    # Score what SHIPS. Every candidate first goes through the same gamut and
+    # steepness guards it would get as the winner. Scoring the raw maps let an
+    # exact transport promise a distribution distance of 0.18 while its guarded,
+    # smoothed self — the LUT actually delivered — measured 3.25 on the picture:
+    # the judge was crowning a candidate that never existed.
+    safe = luts.get("grade", luts.get("mkl"))
+    if safe is not None:
+        for name in list(luts):
+            if name == "grade":
+                luts[name] = steep_guard(luts[name], luts[name])
+            else:
+                luts[name] = steep_guard(gamut_guard(luts[name], Sf_enc, safe), safe)
+
     _p(0.62, "Scoring candidates")
     scores = {}
     # Score on a bounded subsample: with 6 candidates the full pixel set costs
@@ -333,68 +369,66 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
             out_ok = cs.encoded_to_oklab(apply_lut_points(lut, Sf_enc[ssel]), tf) * 100.0
             scores[name] = sliced_wasserstein(out_ok, tgt_ok, seed=seed)
 
-    # Steepness penalty: a candidate that "wins" the distance metric with 10x+
-    # local slopes ships visible damage — steep segments turn 8-bit and H.264
-    # macroblock steps into posterised patches on real footage. Multiplicative,
-    # so it is scale-free across the three metrics; a steep LUT now only wins if
-    # it is MUCH more accurate than a smooth one.
+    # Naturalness penalties, measured on what each candidate does to the actual
+    # picture. A distribution distance alone is gamed by exact-transport maps:
+    # on real footage IDT "won" while turning an orange engine lamp green (hue
+    # twist 125 deg), growing green blotches on a dark sweater from a reference's
+    # green-screen prop, and stretching a flat sky into a banded 5x-contrast
+    # blob. Each of those is a measurable property of the output, so each is a
+    # multiplicative penalty (scale-free across the metrics): steepness, local
+    # contrast amplification, new clipping, hue twist of chromatic pixels and
+    # colour spread among pixels that were neutral. A wilder map now only wins
+    # if it is MUCH closer to the reference than a natural-looking one.
+    nat = _naturalness_probe(src_enc, tf, luts.get("grade"))
+    penalties = {}
     for name in scores:
-        s = lut_steepness(luts[name])
-        scores[name] = float(scores[name]) * (1.0 + 0.15 * max(0.0, s - 4.0))
-
-    # Smooth-region damage penalty (distribution mode). The distribution judges
-    # are blind to WHERE colours land on the frame: IDT can "win" the
-    # sliced-Wasserstein while turning a clean sky gradient into posterised
-    # bands and hue arcs (field case: a no-sky wheat close-up as reference
-    # forced a wide shot's blue sky through banded brown — IDT scored 0.18 vs
-    # sep's 0.80 and shipped). So ALSO judge each candidate on the actual
-    # frame: how much it roughens regions the source renders smooth, in Oklab
-    # so banding and hue swings both count. Measured damage on the field pair:
-    # idt 3.14, sep 1.17, mkl 0.89; on a well-matched pair every candidate sits
-    # near 1.5 — so the penalty starts at 1.8 and is steep enough (x4 per unit)
-    # that a distribution win cannot buy back a posterised sky, while a benign
-    # IDT (damage under 1.8) keeps its earned win untouched.
-    if not corresponded:
-        try:
-            from PIL import Image as _ImD
-            _h, _w = src_enc.shape[:2]
-            _tw = min(320, _w); _th = max(1, int(_h * _tw / max(_w, 1)))
-            _sm = np.asarray(_ImD.fromarray(
-                (np.clip(src_enc, 0, 1) * 255 + 0.5).astype("uint8"))
-                .resize((_tw, _th))).astype(np.float64) / 255.0
-            def _gmag(ok):
-                _gx = np.diff(ok, axis=1)[:-1]; _gy = np.diff(ok, axis=0)[:, :-1]
-                return np.sqrt((_gx ** 2).sum(-1) + (_gy ** 2).sum(-1))
-            _gin = _gmag(cs.encoded_to_oklab(_sm, tf) * 100.0)
-            _msk = _gin <= max(1.0, float(np.percentile(_gin, 30)))
-            if _msk.sum() >= 400:      # enough smooth area to judge fairly
-                _gin_m = float(_gin[_msk].mean()) + 1e-9
-                for name in scores:
-                    _gout = _gmag(cs.encoded_to_oklab(
-                        apply_lut(_sm, luts[name]), tf) * 100.0)
-                    _dmg = float(_gout[_msk].mean()) / _gin_m
-                    scores[name] = float(scores[name]) * (1.0 + 4.0 * max(0.0, _dmg - 1.8))
-        except Exception:
-            pass                       # judging aid only — never sink the match
-
-    best = min(scores, key=scores.get)
-
-    # Incumbent rule (distribution mode): the 1D-curves + residual transfer
-    # ("sep") is the one candidate that never scrambles an image — it moves
-    # tone, WB and palette the way a colourist's global grade does. The
-    # exotic maps (idt/flow/uot) win the statistics whenever they force the
-    # reference's distribution, and the field showed they can do that while
-    # painting a smooth-but-wrong hue arc across a sky that neither the
-    # distance metrics nor the roughness guard can see. So they must now BEAT
-    # the incumbent by a clear margin (25% lower score, penalties included)
-    # to ship. A genuinely better match keeps winning — the field case where
-    # IDT deserves the crown scores 9x lower than sep, not 1.3x.
-    if not corresponded and "sep" in scores and best != "sep":
-        if scores[best] > 0.75 * scores["sep"]:
-            best = "sep"
-
+        pen = 1.0 + 0.15 * max(0.0, lut_steepness(luts[name]) - 4.0)
+        m = _naturalness(nat, luts[name], tf)
+        pen *= 1.0 + 0.8 * max(0.0, m["detail"] - 1.5)
+        pen *= 1.0 + 4.0 * max(0.0, m["clip_inc"] - 0.01)
+        pen *= 1.0 + 0.03 * max(0.0, m["twist"] - 20.0)
+        pen *= 1.0 + 0.5 * max(0.0, m["nspread"] - 2.0)
+        pen *= 1.0 + 0.3 * max(0.0, m["uneven"] - 3.5)
+        pen *= 1.0 + 4.0 * max(0.0, m["smooth"] - 1.8)
+        penalties[name] = (pen, m)
+        scores[name] = float(scores[name]) * pen
+    # Hard limits. An exact-transport map is BUILT to minimise the distribution
+    # distance, so on unrelated content it can be 4-5x "closer" while visibly
+    # wrecking the picture — no proportional penalty is safe against that. Past
+    # these limits the damage is unmistakable to any viewer, so such a candidate
+    # is out of the running whenever a clean one exists.
+    clean = [n for n in scores
+             if penalties[n][1]["twist"] <= 60.0 and penalties[n][1]["detail"] <= 3.0
+             and penalties[n][1]["clip_inc"] <= 0.15 and penalties[n][1]["nspread"] <= 4.0
+             and penalties[n][1]["uneven"] <= 8.0]
+    if clean:
+        ranked = clean
+        best = min(ranked, key=scores.get)
+    else:
+        # Nothing is clean (a reference that is 96% black, a source that is one
+        # flat colour): every candidate wrecks the picture, so "closest to the
+        # reference" is the wrong tie-break — it rewards the biggest wreck (a
+        # day exterior crushed 40% to black to honour a black leader). Ship the
+        # LEAST damaging candidate instead.
+        ranked = sorted(scores, key=lambda n: penalties[n][0])
+        best = ranked[0]
+    # Incumbent rule: the hue-preserving grade is the one candidate that cannot
+    # scramble a picture, so an exact-transport map (idt / flow / uot) has to
+    # BEAT it clearly — 20% lower score, penalties included — to ship. Where
+    # IDT genuinely belongs (two shots of one set) it scores 2-5x lower than
+    # the grade, not 1.1x; the near-ties are exactly the pairs where its extra
+    # "accuracy" is the reference's content forced onto the wrong objects.
+    if ("grade" in ranked and best in ("idt", "flow", "uot")
+            and scores[best] > 0.8 * scores["grade"]):
+        best = "grade"
     res = MatchResult(method=best, scores=scores, lut=luts[best], tf=tf,
                       corresponded=corresponded, score_metric=metric)
+    if _gate_note:
+        res.notes.append(_gate_note)
+    _pm = penalties[best][1]
+    res.notes.append(f"naturalness of the chosen look: contrast x{_pm['detail']:.2f}, "
+                     f"hue twist {_pm['twist']:.0f} deg, new clipping "
+                     f"{100 * max(0.0, _pm['clip_inc']):.1f}%")
 
     # Residual second pass (distribution mode, AI regions available): apply the
     # winner, derive a region-to-region correction on (applied, reference), and keep
@@ -431,30 +465,29 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
         except Exception:
             pass
 
-    # Gamut guard — the "sometimes the colours go insane" fix. The winner was fit
-    # and scored only on sampled pixels; in cube regions those samples never
-    # touched, blend it toward the gain-capped global MKL so a later frame's
-    # out-of-sample colour (flash, neon, deep shadow) can never read extrapolation
-    # garbage. Sampled regions are untouched, so the scores above still hold.
-    if "mkl" in luts:
-        res.lut = gamut_guard(res.lut, Sf_enc, luts["mkl"])
-        # Emergency brake on steepness (covers the +refine composition too): if
-        # the shipping LUT still has posterising slopes, soften it toward the
-        # smooth capped-MKL just enough to get under the visible-damage line.
-        res.lut = steep_guard(res.lut, luts["mkl"])
+    # The gamut guard (the "sometimes the colours go insane" fix) was applied to
+    # every candidate before scoring: the winner was fit on sampled pixels only,
+    # and in cube regions those samples never touched it is blended toward the
+    # safe global look — the hue-preserving grade — so a later frame's
+    # out-of-sample colour (flash, neon, deep shadow) can never read
+    # extrapolation garbage. (The linear MKL that used to fill this role clipped
+    # 8-43% of the picture on real footage when the reference was much darker or
+    # brighter.) A +refine composition is the one thing built after scoring.
+    if safe is not None:
+        if res.method.endswith("+refine"):
+            res.lut = steep_guard(gamut_guard(res.lut, Sf_enc, safe), safe)
         # Keep the top runner-up candidates (same guards) so the panel can offer
         # them as alternative looks. Winner goes first under its own name.
         res.alts[res.method] = res.lut.astype(np.float32)
         # small linear samples for the WB/Tone/Colour strength decomposition
         res.sample_src_lin = Sf_lin[:30000].astype(np.float32)
         res.sample_tgt_lin = Tf_lin[:30000].astype(np.float32)
-        for name in sorted(scores, key=scores.get):
+        for name in sorted(ranked, key=scores.get):
             if len(res.alts) >= 3:
                 break
             if name in res.alts or name == best:
                 continue
-            alt = steep_guard(gamut_guard(luts[name], Sf_enc, luts["mkl"]), luts["mkl"])
-            res.alts[name] = alt.astype(np.float32)
+            res.alts[name] = luts[name].astype(np.float32)
 
     if corresponded and src_enc.shape == tgt_enc.shape:
         de_b = image_delta_e00(src_enc, tgt_enc, tf)
@@ -476,17 +509,151 @@ def match(src_enc: np.ndarray, tgt_enc: np.ndarray, *, corresponded: bool = True
     # only in the broken case; an honest match on aligned frames scores ~0-3.
     if (corresponded and res.de_after is not None
             and res.de_after.get("mean", 0.0) > 8.0):
+        de_bad = float(res.de_after["mean"])
         res = match(src_enc, tgt_enc, corresponded=False, tf=tf, size=size,
                     degrees=degrees, lattice_L=lattice_L, sample=sample,
                     seed=seed, skin_protect=skin_protect, skin_weight=skin_weight,
                     neural=neural, look=look, refine=refine, quick=quick,
                     progress=progress)
         res.notes.append("Same-scene mode produced a poor aligned match "
-                         f"(dE00 {res.de_after['mean']:.1f} before fallback); "
+                         f"(dE00 {de_bad:.1f} before fallback); "
                          "re-matched as different scenes.")
         return res
 
     return res
+
+
+def _naturalness_probe(src_enc: np.ndarray, tf: str,
+                       hue_ref_lut: np.ndarray | None = None) -> dict:
+    """A small copy of the source picture (<= 360 px wide, spatial structure kept)
+    plus its own local-contrast energy, clipping and Oklab chroma/hue, so each
+    candidate's effect on the PICTURE can be measured, not just on a pixel bag.
+    `hue_ref_lut` (the hue-preserving grade) defines where each colour SHOULD
+    land hue-wise; candidates are judged for twisting against it."""
+    from scipy.ndimage import laplace
+    a = np.asarray(src_enc, dtype=np.float64)
+    if a.ndim != 3:
+        a = a.reshape(-1, 1, 3)
+    step = max(1, int(np.ceil(a.shape[1] / 360.0)))
+    img = np.ascontiguousarray(a[::step, ::step])
+    luma = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+    flat = img.reshape(-1, 3)
+    ok = cs.encoded_to_oklab(flat, tf)
+    C = np.hypot(ok[:, 1], ok[:, 2])
+    ref_ab = None
+    if hue_ref_lut is not None:
+        ref_ab = cs.encoded_to_oklab(apply_lut(img, hue_ref_lut).reshape(-1, 3), tf)[:, 1:]
+    # the smoothest 30% of the picture in Oklab (skies, walls, skin): where
+    # banding and hue arcs show first
+    g_in = _oklab_gradient(ok.reshape(img.shape[0], img.shape[1], 3) * 100.0)
+    smooth_mask = g_in <= max(1.0, float(np.percentile(g_in, 30)))
+    return {
+        "img": img,
+        "lap": max(float(np.std(laplace(luma))), 1e-6),
+        "blocks": _block_energy(laplace(luma)),
+        "clip": float(np.mean((luma <= 2 / 255) | (luma >= 253 / 255))),
+        "ab": ok[:, 1:],
+        "ref_ab": ref_ab,
+        "chroma": C,
+        "chromatic": C > 0.05,
+        "neutral": C < 0.02,
+        "smooth_mask": smooth_mask if smooth_mask.sum() >= 400 else None,
+        "smooth_g": float(g_in[smooth_mask].mean()) + 1e-9 if smooth_mask.sum() >= 400 else 1.0,
+    }
+
+
+def _oklab_gradient(ok_img: np.ndarray) -> np.ndarray:
+    gx = np.diff(ok_img, axis=1)[:-1]
+    gy = np.diff(ok_img, axis=0)[:, :-1]
+    return np.sqrt((gx ** 2).sum(-1) + (gy ** 2).sum(-1))
+
+
+def _block_energy(lap: np.ndarray, b: int = 8) -> np.ndarray:
+    """Local-contrast energy per bxb block of a Laplacian image."""
+    h, w = (lap.shape[0] // b) * b, (lap.shape[1] // b) * b
+    if h == 0 or w == 0:
+        return np.array([float(np.std(lap))])
+    blk = lap[:h, :w].reshape(h // b, b, w // b, b)
+    return blk.std(axis=(1, 3)).ravel()
+
+
+def _naturalness(probe: dict, lut: np.ndarray, tf: str) -> dict:
+    """detail: local-contrast energy after/before (5x = a flat sky stretched into
+    banding); clip_inc: fraction of the picture newly crushed to black/white;
+    twist: chroma-weighted 90th-percentile hue rotation (deg) of clearly-
+    chromatic pixels AFTER removing the best global affine chroma move — a
+    white-balance shift or a saturation change is free (that is a grade), only
+    pixels sent somewhere else than the rest count (orange->green scores ~120);
+    nspread: std of output chroma (x100) over pixels that were neutral (a cast
+    is uniform; blotches are not)."""
+    from scipy.ndimage import laplace
+    out = apply_lut(probe["img"], lut)
+    luma = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+    flat = out.reshape(-1, 3)
+    ok = cs.encoded_to_oklab(flat, tf)
+    C = np.hypot(ok[:, 1], ok[:, 2])
+    lap_out = laplace(luma)
+    m = {"detail": float(np.std(lap_out)) / probe["lap"],
+         "clip_inc": float(np.mean((luma <= 2 / 255) | (luma >= 253 / 255))) - probe["clip"],
+         "twist": 0.0, "nspread": 0.0, "uneven": 1.0, "smooth": 1.0}
+    # Smooth-region damage: how much rougher (in Oklab, so banding and hue
+    # arcs both count) the candidate renders the regions the source keeps
+    # smooth. Field pair (a no-sky wheat close-up as reference for a wide shot
+    # with a blue sky): idt 3.14, sep 1.17, mkl 0.89; a well-matched pair sits
+    # near 1.5 for every candidate.
+    if probe.get("smooth_mask") is not None:
+        g_out = _oklab_gradient(ok.reshape(out.shape[0], out.shape[1], 3) * 100.0)
+        m["smooth"] = float(g_out[probe["smooth_mask"]].mean()) / probe["smooth_g"]
+    # Unevenness: local contrast change per block, 95th percentile over the
+    # median. A tone curve changes contrast smoothly with tone (ratio ~1-2.5);
+    # posterised blotches — smooth skin turned into patches — show as a few
+    # blocks with 5-10x the change of the rest.
+    e_in = probe["blocks"]
+    e_out = _block_energy(lap_out)
+    textured = e_in >= max(float(np.percentile(e_in, 20)), 0.003)   # blocks with real texture only
+    if textured.sum() >= 30:
+        ratio = e_out[textured] / e_in[textured]
+        m["uneven"] = float(np.percentile(ratio, 95) / max(float(np.median(ratio)), 1e-6))
+    # chroma-collapse counts as twist too: the output-chroma condition that used
+    # to be here hid an orange lamp turned white (its output chroma fell under
+    # the threshold, so the pixels that mattered most were skipped)
+    sel = probe["chromatic"]
+    if sel.sum() > 50:
+        a_out = ok[sel, 1:]
+        w = probe["chroma"][sel]
+        # Where SHOULD each colour land? Under the hue-preserving grade when it
+        # exists (else: where it already is). That prediction already contains
+        # the legitimate balance shift and saturation change, so NO further
+        # freedom is granted — a fit that allowed a global shift or rotation on
+        # top absorbed a whole family of oranges turning cyan as "global"
+        # (measured). Deviation is an angle over the predicted chroma, so a
+        # collapsed (whitened) lamp counts as much as a rotated one.
+        base = probe["ref_ab"][sel] if probe.get("ref_ab") is not None else probe["ab"][sel]
+        zb = base[:, 0] + 1j * base[:, 1]
+        zo = a_out[:, 0] + 1j * a_out[:, 1]
+        dev = np.abs(zo - zb)
+        dh = np.degrees(np.arctan2(dev, np.maximum(np.abs(zb), 0.02)))
+        # per HUE FAMILY (30-degree bins of the source hue): a small orange lamp
+        # is 0.4% of the frame, so a picture-wide percentile never reaches it,
+        # yet "the orange things went white/green" is exactly what a viewer
+        # sees. Score each family that carries at least 2% of the chroma by its
+        # weighted median deviation; the worst family is the twist.
+        hue_bin = ((np.degrees(np.arctan2(probe["ab"][sel][:, 1], probe["ab"][sel][:, 0]))
+                    + 360.0) % 360.0 / 30.0).astype(int)
+        worst = 0.0
+        for b in range(12):
+            inb = hue_bin == b
+            wb = w[inb]
+            if wb.sum() < 0.02 * w.sum() or inb.sum() < 30:
+                continue
+            order = np.argsort(dh[inb])
+            cw = np.cumsum(wb[order]) / wb.sum()
+            worst = max(worst, float(dh[inb][order][min(int(np.searchsorted(cw, 0.5)), len(wb) - 1)]))
+        m["twist"] = worst
+    neut = probe["neutral"]
+    if neut.sum() > 50:
+        m["nspread"] = float(np.sqrt(ok[neut, 1:].var(axis=0).sum())) * 100.0
+    return m
 
 
 def format_report(res: MatchResult) -> str:
