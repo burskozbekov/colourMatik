@@ -26,6 +26,33 @@ DESTDIR="$(dirname "$DEST")"
 
 [ -d "$SRC" ] || { echo "Built plugin not found at $SRC"; exit 1; }
 
+# Copy a .plugin bundle to its destination WITHOUT ever nesting it. `cp -R src dest`
+# copies src INTO dest when dest still exists — and dest does survive `rm -rf`
+# whenever its parent folder is root-owned (the After Effects Plug-Ins folder on a
+# machine where an earlier install ran with admin rights): rm empties the bundle
+# but cannot remove the folder itself, cp then produces
+# colourMatik.plugin/colourMatik-ae.plugin/Contents, and After Effects loads
+# nothing. ditto merges the bundle's CONTENTS into the destination, so the
+# layout is right whether or not the folder could be removed; the result is
+# checked before it is called installed.
+install_bundle() {   # install_bundle <src.plugin> <dest.plugin>
+    local src="$1" dest="$2"
+    $SUDO rm -rf "$dest" 2>/dev/null || true
+    if [ -d "$dest" ]; then
+        # could not remove the folder itself: at least empty it
+        $SUDO find "$dest" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    fi
+    if ! $SUDO /usr/bin/ditto "$src" "$dest" 2>/dev/null; then
+        echo "  could not write $dest (needs admin rights)"
+        return 1
+    fi
+    if [ ! -d "$dest/Contents/MacOS" ]; then
+        echo "  $dest is not a valid plug-in bundle after the copy"
+        return 1
+    fi
+    return 0
+}
+
 # Prefer no-sudo; fall back to sudo if the shared MediaCore folder needs admin.
 SUDO=""
 if ! mkdir -p "$DESTDIR" 2>/dev/null || [ ! -w "$DESTDIR" ]; then
@@ -36,8 +63,7 @@ if ! mkdir -p "$DESTDIR" 2>/dev/null || [ ! -w "$DESTDIR" ]; then
     fi
     $SUDO mkdir -p "$DESTDIR"
 fi
-$SUDO rm -rf "$DEST"
-$SUDO cp -R "$SRC" "$DEST"   # preserves the shipped signature (Developer ID + notarization)
+install_bundle "$SRC" "$DEST" || CM_SKIPPED="yes"
 $SUDO xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 # Only adhoc-sign as a fallback if the copy has no valid signature at all (e.g. a
 # locally hand-built plugin). A shipped Developer-ID/notarized build is left untouched.
@@ -62,10 +88,12 @@ for AEAPP in /Applications/Adobe\ After\ Effects\ *; do
     fi
     fi
     $SUDO mkdir -p "$AEPLUG/colourMatik"
-    $SUDO rm -rf "$AEDEST"
-    $SUDO cp -R "$AESRC" "$AEDEST"
-    $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
-    echo "Installed effect (After Effects) → $AEDEST"
+    if install_bundle "$AESRC" "$AEDEST"; then
+        $SUDO xattr -dr com.apple.quarantine "$AEPLUG/colourMatik" 2>/dev/null || true
+        echo "Installed effect (After Effects) → $AEDEST"
+    else
+        CM_SKIPPED="yes"
+    fi
     # remove the deprecated ScriptUI panel if a previous version installed it
     $SUDO rm -f "$AEAPP/Scripts/ScriptUI Panels/colourMatik.jsx" 2>/dev/null || true
 done
